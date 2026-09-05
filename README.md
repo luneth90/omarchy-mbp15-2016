@@ -113,21 +113,39 @@ chmod +x omarchy-mbp15-2016.sh
 sudo ./omarchy-mbp15-2016.sh status
 ```
 
-### 3. Install All Drivers & Fixes
+### 3. Install Drivers & System Configurations
 
 > [!IMPORTANT]
 > 1. **Dual-Boot Environment**: Ensure this machine retains its original macOS partitions and firmware environment. Do not wipe or format the entire drive, or Touch Bar firmware will be lost and cannot be driven.
 > 2. **Wi-Fi 5GHz Calibration**: To enable full 5GHz Wi-Fi channels, obtain your MacBook's real macOS Wi-Fi MAC address (e.g., from macOS `networksetup -getmacaddress en0` or your router's client list). Do **not** use a placeholder MAC starting with `00:90:4c:`.
 
-With real Wi-Fi MAC:
+The suite provides three flexible installation modes depending on your needs:
+
+#### Option A: Full Automated Installation (Recommended for first-time setup)
+Installs all dependencies, calibrates 5GHz Wi-Fi with your physical macOS MAC, builds Cirrus audio and Touch Bar DKMS drivers, and deploys suspend/NVMe services:
 ```bash
 sudo ./omarchy-mbp15-2016.sh install --wifi-mac AA:BB:CC:DD:EE:FF
 ```
 
-Or skip Wi-Fi NVRAM update if your Wi-Fi is already calibrated:
+#### Option B: Full Install Skipping Wi-Fi NVRAM
+Installs audio, Touch Bar, and suspend fixes, while keeping the current Wi-Fi NVRAM firmware table untouched (useful if already calibrated or MAC is unknown):
 ```bash
 sudo ./omarchy-mbp15-2016.sh install --skip-wifi-nvram
 ```
+
+#### Option C: Targeted Suspend & NVMe Fix Only (Fast, seconds)
+Skips lengthy DKMS kernel builds and exclusively deploys `mbp15-nvme-d3cold.service` along with Limine `s2idle` and IOMMU kernel parameters to prevent sleep/wake crashes:
+```bash
+sudo ./omarchy-mbp15-2016.sh install-suspend
+```
+
+#### Installation Modes Comparison
+
+| Command | 5GHz Wi-Fi Calibration | Cirrus Audio DKMS | Touch Bar DKMS | Suspend & NVMe D3cold | Expected Duration |
+| :--- | :---: | :---: | :---: | :---: | :---: |
+| `install --wifi-mac <MAC>` | ✅ Injects physical MAC | ✅ Builds & Deploys | ✅ Builds & Deploys | ✅ Enables Service | ~2-3 mins |
+| `install --skip-wifi-nvram` | ❌ Skipped | ✅ Builds & Deploys | ✅ Builds & Deploys | ✅ Enables Service | ~2-3 mins |
+| `install-suspend` | ❌ Skipped | ❌ Skipped | ❌ Skipped | ✅ Enables Service | **A few seconds** |
 
 ### 4. Reboot
 
@@ -161,7 +179,11 @@ sudo ./omarchy-mbp15-2016.sh previous-boot
 | Command | Description |
 | :--- | :--- |
 | `sudo ./omarchy-mbp15-2016.sh status` | Inspect active kernel, boot parameters, and status of all peripherals |
-| `sudo ./omarchy-mbp15-2016.sh install` | Install all required packages, DKMS modules, systemd services, and Limine parameters |
+| `sudo ./omarchy-mbp15-2016.sh install --wifi-mac <MAC>` | [Recommended] Full setup: calibrate 5GHz Wi-Fi, build audio/Touch Bar DKMS, and deploy suspend fixes |
+| `sudo ./omarchy-mbp15-2016.sh install --skip-wifi-nvram` | Full setup for audio, Touch Bar, and suspend, while skipping Wi-Fi NVRAM updates |
+| `sudo ./omarchy-mbp15-2016.sh install-suspend` | Fast targeted setup: deploy `mbp15-nvme-d3cold.service` and Limine s2idle/IOMMU suspend parameters |
+| `sudo ./omarchy-mbp15-2016.sh install-touchbar` | Rebuild and deploy only the Apple T1 and Touch Bar DKMS drivers and resume hooks |
+| `sudo ./omarchy-mbp15-2016.sh install-audio` | Rebuild and deploy only the Cirrus CS8409 audio DKMS driver |
 | `sudo ./omarchy-mbp15-2016.sh verify` | Validate Wi-Fi MAC, SPI devices, audio cards, Touch Bar, SMC fans & thermal, and NVMe D3cold |
 | `sudo ./omarchy-mbp15-2016.sh pm-test` | Staged PM test (`pm_test=devices`) to safely verify driver suspend/resume |
 | `sudo ./omarchy-mbp15-2016.sh previous-boot` | Query systemd and dmesg logs from the previous boot session for PM debugging |

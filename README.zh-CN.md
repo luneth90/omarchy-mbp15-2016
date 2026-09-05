@@ -119,15 +119,33 @@ sudo ./omarchy-mbp15-2016.sh status
 > 1. **双系统环境**：请确保本机保留了 macOS 原厂分区与固件环境，切勿抹盘全盘格式化，否则会导致 Touch Bar 缺失底层固件而无法驱动。
 > 2. **Wi-Fi 5GHz 校准**：要完整激活 5GHz Wi-Fi 频段，需要提供你这台机器在 macOS 下的真实 Wi-Fi MAC 地址（可在 macOS 终端执行 `networksetup -getmacaddress en0` 或路由器后台查询）。切勿使用以 `00:90:4c:` 开头的占位 MAC。
 
-携带真实 Wi-Fi MAC 安装：
+脚本提供三种不同的安装模式，请根据具体需求选择执行：
+
+#### 选项 A：全量完整安装（推荐首次使用）
+一键配置所有外设（注入 macOS 物理 MAC 激活 5GHz Wi-Fi、编译 Cirrus 声卡 DKMS、编译 Apple T1 Touch Bar 驱动与服务、部署休眠与 NVMe 防死锁服务）：
 ```bash
 sudo ./omarchy-mbp15-2016.sh install --wifi-mac AA:BB:CC:DD:EE:FF
 ```
 
-若已校准过 Wi-Fi NVRAM，可跳过此步骤：
+#### 选项 B：全量安装但跳过 Wi-Fi 固件更新
+执行声卡、Touch Bar 与休眠服务的全套安装，但保留当前 Wi-Fi NVRAM 固件不作更改（适用于已校准过 MAC 或暂无真实 MAC 的情况）：
 ```bash
 sudo ./omarchy-mbp15-2016.sh install --skip-wifi-nvram
 ```
+
+#### 选项 C：仅安装休眠与 NVMe 防黑屏服务（秒级轻量定向安装）
+跳过耗时的声卡与 Touch Bar 驱动拉取和 DKMS 编译，仅部署 `mbp15-nvme-d3cold.service`，注入 Limine `s2idle` 与 IOMMU 引导参数，防止合盖唤醒黑屏死机：
+```bash
+sudo ./omarchy-mbp15-2016.sh install-suspend
+```
+
+#### 安装命令功能对比
+
+| 命令 | 5GHz Wi-Fi 校准 | Cirrus 声卡驱动 | Touch Bar 驱动 | 休眠/NVMe 防死锁服务 | 预计耗时 |
+| :--- | :---: | :---: | :---: | :---: | :---: |
+| `install --wifi-mac <MAC>` | ✅ 注入真实 MAC | ✅ 编译部署 | ✅ 编译部署 | ✅ 部署启用 | 约 2~3 分钟 |
+| `install --skip-wifi-nvram` | ❌ 跳过 | ✅ 编译部署 | ✅ 编译部署 | ✅ 部署启用 | 约 2~3 分钟 |
+| `install-suspend` | ❌ 跳过 | ❌ 跳过 | ❌ 跳过 | ✅ 部署启用 | **数秒内** |
 
 ### 4. 重启系统
 
@@ -161,7 +179,11 @@ sudo ./omarchy-mbp15-2016.sh previous-boot
 | 指令 | 作用说明 |
 | :--- | :--- |
 | `sudo ./omarchy-mbp15-2016.sh status` | 查看当前内核、引导参数以及各项外设驱动运行状态 |
-| `sudo ./omarchy-mbp15-2016.sh install` | 一键安装必要依赖包、编译 DKMS 模块、部署服务与引导配置 |
+| `sudo ./omarchy-mbp15-2016.sh install --wifi-mac <MAC>` | 【推荐】全量安装所有依赖包、校准 5GHz Wi-Fi、编译声卡与 Touch Bar、部署休眠与引导配置 |
+| `sudo ./omarchy-mbp15-2016.sh install --skip-wifi-nvram` | 全量安装声卡、Touch Bar 与休眠配置，但跳过 Wi-Fi NVRAM 固件更新 |
+| `sudo ./omarchy-mbp15-2016.sh install-suspend` | 定向秒级部署 `mbp15-nvme-d3cold.service` 与 Limine s2idle/IOMMU 休眠防死锁配置 |
+| `sudo ./omarchy-mbp15-2016.sh install-touchbar` | 单独重新编译与部署 Touch Bar 与 Apple T1 iBridge DKMS 驱动与自启服务 |
+| `sudo ./omarchy-mbp15-2016.sh install-audio` | 单独重新编译与部署 Cirrus Logic CS8409 音频 DKMS 驱动 |
 | `sudo ./omarchy-mbp15-2016.sh verify` | 自动检查 Wi-Fi MAC、键盘触控板、声卡、Touch Bar、SMC 风扇与温控及 NVMe 状态 |
 | `sudo ./omarchy-mbp15-2016.sh pm-test` | 启用 `pm_test=devices` 安全测试外设驱动的休眠与唤醒 |
 | `sudo ./omarchy-mbp15-2016.sh previous-boot` | 检索上一启动周期的 systemd sleep 与 dmesg 休眠挂起日志 |
