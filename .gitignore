@@ -1,0 +1,15 @@
+# Backup files
+*.bak
+*.before
+*.tmp
+
+# State & build files
+/var/
+build/
+*.o
+*.ko
+*.zst
+
+# OS artifacts
+.DS_Store
+*~
