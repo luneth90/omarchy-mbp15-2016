@@ -472,6 +472,7 @@ Usage:
   sudo $0 status
   sudo $0 install --wifi-mac AA:BB:CC:DD:EE:FF
   sudo $0 install --skip-wifi-nvram
+  sudo $0 install-suspend
   sudo reboot
   sudo $0 verify
   sudo $0 pm-test
@@ -490,6 +491,9 @@ USAGE
 case "${1:-}" in
   status) status ;;
   install|apply) shift; install_all "$@" ;;
+  install-suspend|install-nvme) need_root; preflight; install_suspend ;;
+  install-touchbar) need_root; preflight; install_touchbar ;;
+  install-audio) need_root; preflight; install_audio ;;
   verify) verify ;;
   pm-test) pm_test ;;
   previous-boot) previous_boot ;;
