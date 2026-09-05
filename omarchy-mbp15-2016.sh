@@ -15,6 +15,7 @@ set -Eeuo pipefail
 #   sudo ./omarchy-mbp15-2016.sh rollback
 #
 # IMPORTANT:
+# - Requires dual-boot alongside macOS! Clean wipe/format installs erase Touch Bar firmware.
 # - Preserves macOS / Apple EFI / APFS. Never repartitions disks.
 # - Never runs a real suspend automatically.
 # - Real suspend must be tested manually with physical access.
@@ -58,6 +59,9 @@ preflight(){
     p="$(cat "$d/idProduct" 2>/dev/null || true)"
     [[ "$p" == "8600" || "$p" == "1281" ]] && break
   done
+  if [[ "$p" == "1281" ]]; then
+    die "T1/iBridge is in DFU recovery mode (05ac:1281). Missing Touch Bar firmware! Omarchy must be dual-booted with macOS preserved; clean wipe/format installs erase required bridgeOS firmware."
+  fi
   [[ "$p" == "8600" ]] || die "T1/iBridge is not healthy (expected 05ac:8600, got ${p:-unknown})."
   ok "$MODEL detected"
   ok "T1/iBridge 05ac:8600 detected"
@@ -88,7 +92,7 @@ git_sync(){
 install_packages(){
   have pacman || die "pacman not found; this script targets Omarchy/Arch."
   pacman -S --needed --noconfirm base-devel git curl wget dkms linux-headers zstd patch \
-    alsa-utils pipewire wireplumber usbutils pciutils iw v4l-utils
+    alsa-utils pipewire wireplumber usbutils pciutils iw v4l-utils lm_sensors
   if pacman -Q macbook12-spi-driver-dkms >/dev/null 2>&1; then
     pacman -Rns --noconfirm macbook12-spi-driver-dkms || true
   fi
@@ -238,6 +242,50 @@ verify_webcam(){
   v4l2-ctl --list-devices 2>/dev/null || true
 }
 
+# ---------- Fans / Thermal sensors ----------
+verify_fans_thermal(){
+  log "Fans & Thermal sensors (Apple SMC)"
+  local smc_dir="" f rpm manual count=0
+  for d in /sys/devices/platform/applesmc.*; do
+    [[ -d "$d" ]] && { smc_dir="$d"; break; }
+  done
+  if [[ -z "$smc_dir" ]]; then
+    modprobe applesmc 2>/dev/null || true
+    for d in /sys/devices/platform/applesmc.*; do
+      [[ -d "$d" ]] && { smc_dir="$d"; break; }
+    done
+  fi
+  if [[ -z "$smc_dir" ]]; then
+    fail "Apple SMC sysfs interface not found; applesmc driver not loaded"
+    return 1
+  fi
+  ok "Apple SMC detected at $(basename "$smc_dir")"
+  for f in "$smc_dir"/fan*_input; do
+    [[ -e "$f" ]] || continue
+    local fname fan_num
+    fname="$(basename "$f")"
+    fan_num="${fname#fan}"
+    fan_num="${fan_num%_input}"
+    rpm="$(cat "$f" 2>/dev/null || echo 0)"
+    manual="$(cat "$smc_dir/fan${fan_num}_manual" 2>/dev/null || echo "?")"
+    echo "  Fan $fan_num: ${rpm} RPM (manual=$manual [0=firmware-managed])"
+    ((count++))
+  done
+  if (( count == 0 )); then
+    fail "No fan inputs found under Apple SMC"
+    return 1
+  fi
+  local t=""
+  for tf in "$smc_dir"/temp*_input /sys/class/thermal/thermal_zone*/temp; do
+    if [[ -e "$tf" ]]; then
+      local raw; raw="$(cat "$tf" 2>/dev/null || echo 0)"
+      if (( raw > 1000 )); then t="$(( raw / 1000 ))°C"; break; fi
+    fi
+  done
+  [[ -n "$t" ]] && echo "  Current temperature: $t"
+  ok "Fans and thermal sensors operating under SMC firmware management"
+}
+
 # ---------- Suspend / NVMe ----------
 nvme_bdfs(){
   local n d bdf
@@ -340,6 +388,7 @@ status(){
   verify_wifi || true; echo
   verify_applespi || true; echo
   verify_webcam || true; echo
+  verify_fans_thermal || true; echo
   verify_audio || true; echo
   verify_touchbar || true; echo
   verify_suspend || true
@@ -349,6 +398,7 @@ verify(){
   verify_wifi || rc=1
   verify_applespi || rc=1
   verify_webcam || rc=1
+  verify_fans_thermal || rc=1
   verify_audio || rc=1
   verify_touchbar || rc=1
   verify_suspend || rc=1

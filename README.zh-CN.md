@@ -2,12 +2,29 @@
 
 [English](README.md) | **简体中文**
 
-> 专为 MacBook Pro（15寸，2016款 / `MacBookPro13,3`）打造的 Omarchy (Arch Linux) 全套硬件驱动与系统适配自动化套件。
+> 专为 MacBook Pro（15寸，2016款 / `MacBookPro13,3`）打造的 macOS + Omarchy (Arch Linux) 双系统硬件驱动与系统适配自动化套件。
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Target: MacBookPro13,3](https://img.shields.io/badge/硬件型号-MacBookPro13%2C3-blue.svg)](#硬件规格与支持矩阵)
+[![Setup: Dual Boot](https://img.shields.io/badge/安装形态-macOS%20%2B%20Omarchy%20双系统-brightgreen.svg)](#-重要安装须知必须双系统切勿抹盘格式化安装)
 [![OS: Omarchy](https://img.shields.io/badge/操作系统-Omarchy%20%2F%20Arch-orange.svg)](https://omarchy.org)
 [![Kernel: Linux 7.1.x](https://img.shields.io/badge/内核-Linux%207.1.x-brightgreen.svg)](#系统环境要求)
+
+---
+
+## ⚠️ 重要安装须知：必须双系统，切勿抹盘格式化安装！
+
+> [!CAUTION]
+> **本项目必须在保留原有 macOS 的双系统（Dual Boot）环境下使用！切勿全盘抹除/格式化安装单系统 Linux！**
+> 
+> - **Touch Bar 固件依赖**：MacBook Pro 2016 款的 Touch Bar 触控条由独立的 **Apple T1 安全协处理器（iBridge）** 驱动，T1 内部运行独立的 embeddedOS/bridgeOS 系统。设备开机引导时，T1 芯片必须依赖 Apple 原厂 EFI 与 macOS 分区提供的专属固件进行初始化与引导。
+> - **抹盘格式化安装的后果**：如果直接抹除整块硬盘（Clean Install / 单系统格式化安装 Linux），**系统将彻底缺失 Touch Bar 运行所需的底层固件**。T1 协处理器将因无法获取固件而无法正常初始化，甚至会掉入 DFU 恢复模式（在 Linux 下设备 ID 会显示为 `05ac:1281` 而非正常的 `05ac:8600`）。在此状态下，**任何 Linux 驱动都无法点亮 Touch Bar，触控条将彻底黑屏失效**。
+> - **推荐双系统安装流程**：
+>   1. 正常进入 macOS，打开系统自带的**磁盘工具**（Disk Utility）；
+>   2. 选中“Macintosh HD”所在的 APFS 容器进行“分区/调整大小”，缩小 macOS 空间，为 Omarchy 腾出未分配空闲空间（建议划分 60GB 以上）；
+>   3. 顺便在 macOS 终端中运行 `networksetup -getmacaddress en0`，记录下真实的 Wi-Fi 物理 MAC 地址；
+>   4. 插入 Omarchy / Arch 安装 U 盘开机，**仅将 Linux 安装至刚才划分出的空闲分区**，务必完整保留 macOS 容器、Recovery 恢复分区与 Apple 原厂 EFI 分区；
+>   5. 进入 Omarchy 后，再克隆并运行本项目脚本一键激活所有驱动。
 
 ---
 
@@ -38,6 +55,7 @@
 | **显卡** | Intel HD 530 + AMD Radeon Pro | `i915` + `amdgpu` + `apple_gmux` | 正常运行 |
 | **电源 / 休眠** | Apple 原装 NVMe + PCIe 电源管理 | `s2idle` + NVMe D3cold 动态接管 | 稳定休眠 |
 | **摄像头** | FaceTime 高清摄像头 | `uvcvideo` / V4L2 | 原生支持 |
+| **风扇与温控** | Apple SMC (双风扇 + 温度传感器) | `applesmc` + `coretemp` | 原生支持 (固件闭环控温，无需 mbpfan) |
 
 ---
 
@@ -53,12 +71,16 @@
   - 注入 macOS 原生出厂物理 MAC 地址，解除 5GHz (Band 2) 频段锁定，彻底解决高延迟与掉线问题。
 - **Cirrus CS8409 高清音频驱动自动部署**：
   - 自动集成并编译 `snd_hda_macbookpro`，支持 PipeWire/ALSA 完整接管内置四扬声器与耳机口输出。
+- **风扇与温控闭环管理（固件级自动接管）**：
+  - Apple SMC 硬件控制器与主线 `applesmc` / `coretemp` 驱动原生联动，双风扇与各区温控传感器开箱即用；
+  - 默认由 SMC 原厂固件闭环控温，根据内部热度自动调节风扇转速与硬件过热保护，无需额外常驻守护进程（即 `mbpfan is not needed`；如需激进低温降温曲线也可按需选装 `mbpfan`）；
+  - 脚本与验证门禁自动检测 Apple SMC 状态、双风扇 RPM 实时转速与工作模式。
 - **稳定可靠的休眠与唤醒支持**：
   - 配置 `systemd-sleep` 使用 `freeze` / `s2idle`；
   - 在 Limine 引导器中自动注入 `mem_sleep_default=s2idle`、`intel_iommu=on`、`iommu=pt` 与 `pcie_ports=compat` 参数；
   - 部署 `mbp15-nvme-d3cold.service`，开机及休眠前动态关闭 Apple NVMe 控制器的 `d3cold_allowed`，避免其在休眠恢复时与独显冲突挂死。
 - **安全第一与完整回滚机制**：
-  - 严密的设备型号（`MacBookPro13,3`）与 T1 状态预检（`05ac:8600`），避免误刷不兼容设备；
+  - 严密的设备型号（`MacBookPro13,3`）与 T1 状态预检（检测 `05ac:8600`，若因全盘格式化丢失固件导致 T1 陷入恢复模式 `05ac:1281` 则立即拦截熔断并警告）；
   - 绝不重新划分磁盘，保留 macOS、Apple EFI 和 APFS 分区安全；
   - 提供一键回滚命令（`rollback`），原样恢复系统原本配置。
 
@@ -66,6 +88,7 @@
 
 ## 系统环境要求
 
+- **系统形态**：**macOS + Omarchy 双系统**（必须保留原有 macOS 与 Apple EFI 分区，切勿抹盘全盘格式化）。
 - **机型**：Apple MacBook Pro 15-inch（Late 2016，带 Touch Bar，机型代号 `MacBookPro13,3`）。
 - **操作系统**：[Omarchy](https://omarchy.org) 或基于 Arch Linux 的发行版。
 - **内核版本**：Linux 7.1.x 系列（需已安装对应内核头文件 `linux-headers`）。
@@ -93,7 +116,8 @@ sudo ./omarchy-mbp15-2016.sh status
 ### 3. 一键安装与配置驱动
 
 > [!IMPORTANT]
-> 要完整激活 5GHz Wi-Fi 频段，需要提供你这台机器在 macOS 下的真实 Wi-Fi MAC 地址（可在 macOS 终端执行 `networksetup -getmacaddress en0` 或路由器后台查询）。切勿使用以 `00:90:4c:` 开头的占位 MAC。
+> 1. **双系统环境**：请确保本机保留了 macOS 原厂分区与固件环境，切勿抹盘全盘格式化，否则会导致 Touch Bar 缺失底层固件而无法驱动。
+> 2. **Wi-Fi 5GHz 校准**：要完整激活 5GHz Wi-Fi 频段，需要提供你这台机器在 macOS 下的真实 Wi-Fi MAC 地址（可在 macOS 终端执行 `networksetup -getmacaddress en0` 或路由器后台查询）。切勿使用以 `00:90:4c:` 开头的占位 MAC。
 
 携带真实 Wi-Fi MAC 安装：
 ```bash
@@ -138,7 +162,7 @@ sudo ./omarchy-mbp15-2016.sh previous-boot
 | :--- | :--- |
 | `sudo ./omarchy-mbp15-2016.sh status` | 查看当前内核、引导参数以及各项外设驱动运行状态 |
 | `sudo ./omarchy-mbp15-2016.sh install` | 一键安装必要依赖包、编译 DKMS 模块、部署服务与引导配置 |
-| `sudo ./omarchy-mbp15-2016.sh verify` | 自动检查 Wi-Fi MAC、键盘触控板、声卡、Touch Bar sysfs 及 NVMe 状态 |
+| `sudo ./omarchy-mbp15-2016.sh verify` | 自动检查 Wi-Fi MAC、键盘触控板、声卡、Touch Bar、SMC 风扇与温控及 NVMe 状态 |
 | `sudo ./omarchy-mbp15-2016.sh pm-test` | 启用 `pm_test=devices` 安全测试外设驱动的休眠与唤醒 |
 | `sudo ./omarchy-mbp15-2016.sh previous-boot` | 检索上一启动周期的 systemd sleep 与 dmesg 休眠挂起日志 |
 | `sudo ./omarchy-mbp15-2016.sh rollback` | 完整还原所有修改的配置文件，移除所部署的服务并刷新引导 |
