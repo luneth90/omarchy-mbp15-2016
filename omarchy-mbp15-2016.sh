@@ -325,7 +325,7 @@ Before=sleep.target
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=/usr/bin/sh -c 'for n in /sys/class/nvme/nvme*/device; do dev=$(readlink -f "$n") || continue; bdf=$(basename "$dev"); p="/sys/bus/pci/devices/$bdf/d3cold_allowed"; [ -e "$p" ] && echo 0 > "$p"; done'
+ExecStart=/usr/bin/sh -c 'for n in /sys/class/nvme/nvme*/device; do dev=$(readlink -f "$n" 2>/dev/null) || continue; bdf=$(basename "$dev"); p="/sys/bus/pci/devices/$bdf/d3cold_allowed"; if [ -e "$p" ]; then echo 0 > "$p"; fi; done; exit 0'
 
 [Install]
 WantedBy=multi-user.target
@@ -358,7 +358,13 @@ verify_suspend(){
     [[ "$v" == "0" ]] && ok "NVMe $b D3cold disabled" || { fail "NVMe $b D3cold is not disabled"; rc=1; }
   done < <(nvme_bdfs)
   (( found )) || { fail "No NVMe d3cold control found"; rc=1; }
-  systemctl is-active --quiet mbp15-nvme-d3cold.service && ok "mbp15-nvme-d3cold.service active" || { fail "NVMe service inactive"; rc=1; }
+  if systemctl is-active --quiet mbp15-nvme-d3cold.service; then
+    ok "mbp15-nvme-d3cold.service active"
+  else
+    local st; st="$(systemctl is-active mbp15-nvme-d3cold.service 2>/dev/null || echo 'not-found')"
+    fail "NVMe service inactive (state: $st). Run 'sudo systemctl restart mbp15-nvme-d3cold.service' or re-run install."
+    rc=1
+  fi
   return "$rc"
 }
 pm_test(){
