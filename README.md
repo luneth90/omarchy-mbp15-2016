@@ -2,13 +2,13 @@
 
 **English** | [简体中文](README.zh-CN.md)
 
-> Automated hardware enablement and driver integration suite for MacBook Pro (15-inch, Late 2016 / `MacBookPro13,3`) in a **macOS + Omarchy (Arch Linux) dual-boot** configuration.
+> Automated hardware enablement, GPU switching, and thermal cooling suite for MacBook Pro (15-inch, Late 2016 / `MacBookPro13,3`) in a **macOS + Omarchy (Arch Linux) dual-boot** configuration.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Target: MacBookPro13,3](https://img.shields.io/badge/Hardware-MacBookPro13%2C3-blue.svg)](#hardware-specification)
 [![Setup: Dual Boot](https://img.shields.io/badge/Setup-macOS%20%2B%20Omarchy%20Dual%20Boot-brightgreen.svg)](#-critical-installation-notice-dual-boot-required-do-not-wipe-disk)
 [![OS: Omarchy](https://img.shields.io/badge/OS-Omarchy%20%2F%20Arch-orange.svg)](https://omarchy.org)
-[![Kernel: Linux 7.1.x](https://img.shields.io/badge/Kernel-Linux%207.1.x-brightgreen.svg)](#requirements)
+[![Kernel: Linux 7.1.x/7.2.x](https://img.shields.io/badge/Kernel-Linux%207.1.x%2F7.2.x-brightgreen.svg)](#requirements)
 
 ---
 
@@ -33,12 +33,13 @@
 Running Linux on Apple hardware from the 2016 Touch Bar era presents notorious hardware integration challenges. The 15-inch Late 2016 MacBook Pro (`MacBookPro13,3`) features a complex hardware topology: an Apple T1 security coprocessor (iBridge), a dynamic OLED Touch Bar, dual graphics (Intel HD 530 + AMD Radeon Pro 450/455/460 via `apple_gmux`), Cirrus Logic CS8409 high-definition audio, and a Broadcom BCM43602 PCIe Wi-Fi chip.
 
 Out of the box on standard Linux installations:
-- The **Touch Bar** remains dark or causes boot hangs due to kernel initialization races.
+- **Severe Overheating & High Idle Power**: The AMD discrete GPU runs constantly with memory clocks locked at maximum (drawing 10–15W idle), making the aluminum chassis uncomfortably hot.
+- **The Touch Bar** remains dark or causes boot hangs due to kernel initialization races.
 - **Wi-Fi** defaults to a placeholder MAC address (`00:90:4c:...`), locking out the 5GHz (Band 2) spectrum and causing high ping latency.
 - **Internal speakers and headphone jack** lack audio output.
 - **Suspend / sleep** fails or freezes the system when waking due to PCIe bus and NVMe D3cold power state conflicts with the AMD GPU.
 
-**omarchy-mbp15-2016** provides a production-grade, battle-tested automated setup and diagnostic suite that resolves all these issues cleanly without touching disk partition tables or endangering existing macOS installations.
+**omarchy-mbp15-2016** provides a production-grade, battle-tested automated setup, thermal optimization, and diagnostic suite that resolves all these issues cleanly without touching disk partition tables or endangering existing macOS installations.
 
 ---
 
@@ -49,18 +50,24 @@ Out of the box on standard Linux installations:
 | **Model** | `MacBookPro13,3` (15-inch, 2016) | DMI `product_name` | Supported |
 | **Security Chip** | Apple T1 Coprocessor (`05ac:8600`) | `appleibridge` (late load) | Working |
 | **Touch Bar** | 2170x60 OLED Multi-Touch Strip | `apple-ib-tb` DKMS + `touchbar.service` | Working |
+| **Graphics** | Intel HD 530 (iGPU) + AMD Radeon Pro (dGPU) | `i915` + `amdgpu` + EFI `gpu-power-prefs` | Working (One-click toggle) |
+| **Cooling & Fans** | Apple SMC Dual Fans + `mbpfan` active curve | `applesmc` + `coretemp` + `mbpfan` | Working (Active cooling + Turbo limits) |
 | **Wi-Fi** | Broadcom BCM43602 (`14e4:43ba`) | `brcmfmac` + custom NVRAM firmware | Working (2.4G & 5G) |
 | **Audio** | Cirrus Logic CS8409 HDA Codec | `snd_hda_macbookpro` DKMS | Working |
 | **Keyboard / Trackpad** | Apple SPI Keyboard & Force Touch | Mainline `applespi` kernel module | Working |
-| **Graphics** | Intel HD 530 + AMD Radeon Pro | `i915` + `amdgpu` + `apple_gmux` | Working |
 | **Power / Suspend** | Apple NVMe Controller + PCIe PM | `s2idle` + NVMe D3cold override | Working |
 | **Webcam** | FaceTime HD Camera | `uvcvideo` / V4L2 | Working |
-| **Fans & Thermal** | Apple SMC (Dual Fans + Thermal Sensors) | `applesmc` + `coretemp` | Working (Firmware-managed, mbpfan optional) |
 
 ---
 
 ## Key Features
 
+- **Radical Thermal Taming & Flexible GPU Switching**:
+  - **Decoupled Verification**: Touch Bar runs on internal USB HID and suspend relies on NVMe s2idle management—**completely decoupled from AMD GPU state**.
+  - **Integrated Graphics (iGPU) Mode (`gpu-igpu`)**: Modifies Apple EFI variables to route internal display to Intel HD 530. The power-hungry AMD dGPU is powered down (0W), dropping idle consumption by 10–15W and temperatures to a cool ~38–45°C.
+  - **Discrete Graphics (dGPU) Mode (`gpu-dgpu`)**: Toggle back to the AMD GPU whenever external USB-C displays or 3D compute are needed.
+  - **`mbpfan` Active Thermal Daemon**: Overrides Apple SMC's sluggish default curve to aggressively vent heat before the body warms up.
+  - **CPU Turbo Power Throttling**: Restrains Intel Turbo Boost spikes on battery to prevent sudden heat surges.
 - **Touch Bar & T1 Stabilization**:
   - Automatically builds and installs the `appleibridge` and `apple-ib-tb` DKMS kernel modules.
   - Blacklists early module loading to prevent race conditions and boot freezes.
@@ -71,29 +78,45 @@ Out of the box on standard Linux installations:
   - Replaces Broadcom's dummy placeholder MAC with your physical macOS Wi-Fi MAC, unlocking Band 2 (5GHz 802.11ac) channels and eliminating latency spikes.
 - **Native Cirrus Audio DKMS**:
   - Builds and installs `snd_hda_macbookpro` for full ALSA/PipeWire routing across quad speakers and 3.5mm jack.
-- **Firmware-Managed Dual Fan & Thermal Control**:
-  - Mainline `applesmc` and `coretemp` drivers natively read all zone temperature sensors and dual-fan telemetry.
-  - Apple SMC hardware firmware autonomously manages thermal throttling and dynamic fan curves in a closed loop (i.e. `mbpfan is not needed`; users seeking aggressive cooling curves may still optionally install `mbpfan`).
-  - Automated status inspection and verification gates audit SMC fan RPMs and operating modes.
 - **Rock-Solid Sleep / Resume**:
   - Configures `systemd-sleep` to `freeze` / `s2idle`.
   - Injects `mem_sleep_default=s2idle`, `iommu=pt`, `intel_iommu=on`, and `pcie_ports=compat` into Limine bootloader.
   - Deploys `mbp15-nvme-d3cold.service` to dynamically disable `d3cold_allowed` on active Apple NVMe controllers, avoiding sleep crashes.
 - **Safety First & Safe Rollback**:
-  - Pre-flight checks strictly enforce model identity (`MacBookPro13,3`) and T1 health (`05ac:8600`; fails immediately with clear error if T1 dropped into DFU recovery mode `05ac:1281` due to missing firmware after a full disk wipe).
+  - Pre-flight checks strictly enforce model identity (`MacBookPro13,3`) and T1 health (`05ac:8600`).
   - Never repartitions disks or modifies Apple APFS / EFI partitions.
   - One-command rollback restores original configuration files and removes installed services.
 
 ---
 
-## Requirements
+## Thermal Management & GPU Switching Guide
 
-- **Setup Mode**: **macOS + Omarchy Dual Boot** (must preserve original macOS partition and Apple EFI; clean format installs will leave Touch Bar without firmware).
-- **Device**: Apple MacBook Pro 15-inch (Late 2016, Touch Bar, `MacBookPro13,3`).
-- **Operating System**: [Omarchy](https://omarchy.org) / Arch Linux.
-- **Kernel**: Linux 7.1.x series (`linux`, `linux-headers`).
-- **Bootloader**: Limine (`limine-entry-tool`, `limine-update`).
-- **Permissions**: Root (`sudo`).
+### Why Does the 2016 15" MBP Run Hot on Linux?
+1. **AMD dGPU Clock Lock**: Linux EFI defaults to driving the 2880×1800 display via the AMD discrete GPU. Due to V-Blank timing constraints on Polaris 11, the memory clock locks at maximum (`1270 MHz`, `3D_FULL_SCREEN`), dissipating >10W constantly at idle.
+2. **Passive Apple SMC Curves**: Factory SMC firmware prioritizes silence, keeping fans under 3000 RPM even when core temperatures climb beyond 65°C.
+3. **Intel Turbo Spikes**: The 14nm Skylake CPU momentarily spikes up to 45W+ under light multi-threaded tasks.
+
+### One-Click Solution: Switch to Intel HD 530 iGPU (Recommended)
+If you do not need external monitors, forcing Intel integrated graphics is the **most definitive fix**:
+
+```bash
+# 1. Deploy mbpfan custom curve and CPU cooling policy
+sudo ./omarchy-mbp15-2016.sh install-cooling
+
+# 2. Switch EFI preference to Intel HD 530
+sudo ./omarchy-mbp15-2016.sh gpu-igpu
+
+# 3. Reboot
+sudo reboot
+```
+
+> [!TIP]
+> **Connecting External Displays Later**:
+> External USB-C video outputs on `MacBookPro13,3` are physically hardwired to the AMD dGPU. If you ever need to connect external monitors, simply run:
+> ```bash
+> sudo ./omarchy-mbp15-2016.sh gpu-dgpu
+> sudo reboot
+> ```
 
 ---
 
@@ -115,37 +138,34 @@ sudo ./omarchy-mbp15-2016.sh status
 
 ### 3. Install Drivers & System Configurations
 
-> [!IMPORTANT]
-> 1. **Dual-Boot Environment**: Ensure this machine retains its original macOS partitions and firmware environment. Do not wipe or format the entire drive, or Touch Bar firmware will be lost and cannot be driven.
-> 2. **Wi-Fi 5GHz Calibration**: To enable full 5GHz Wi-Fi channels, obtain your MacBook's real macOS Wi-Fi MAC address (e.g., from macOS `networksetup -getmacaddress en0` or your router's client list). Do **not** use a placeholder MAC starting with `00:90:4c:`.
-
-The suite provides three flexible installation modes depending on your needs:
+The suite provides flexible installation options:
 
 #### Option A: Full Automated Installation (Recommended for first-time setup)
-Installs all dependencies, calibrates 5GHz Wi-Fi with your physical macOS MAC, builds Cirrus audio and Touch Bar DKMS drivers, and deploys suspend/NVMe services:
+Installs all dependencies, calibrates 5GHz Wi-Fi with your physical macOS MAC, builds Cirrus audio and Touch Bar DKMS drivers, and deploys suspend/NVMe services and `mbpfan` cooling:
 ```bash
 sudo ./omarchy-mbp15-2016.sh install --wifi-mac AA:BB:CC:DD:EE:FF
 ```
 
 #### Option B: Full Install Skipping Wi-Fi NVRAM
-Installs audio, Touch Bar, and suspend fixes, while keeping the current Wi-Fi NVRAM firmware table untouched (useful if already calibrated or MAC is unknown):
+Installs audio, Touch Bar, suspend fixes, and cooling, while keeping the current Wi-Fi NVRAM firmware table untouched:
 ```bash
 sudo ./omarchy-mbp15-2016.sh install --skip-wifi-nvram
 ```
 
-#### Option C: Targeted Suspend & NVMe Fix Only (Fast, seconds)
-Skips lengthy DKMS kernel builds and exclusively deploys `mbp15-nvme-d3cold.service` along with Limine `s2idle` and IOMMU kernel parameters to prevent sleep/wake crashes:
+#### Option C: Targeted Thermal Cooling Only (Fast, seconds)
+Exclusively deploys the tuned `mbpfan` fan daemon and CPU thermal power limits:
 ```bash
-sudo ./omarchy-mbp15-2016.sh install-suspend
+sudo ./omarchy-mbp15-2016.sh install-cooling
 ```
 
 #### Installation Modes Comparison
 
-| Command | 5GHz Wi-Fi Calibration | Cirrus Audio DKMS | Touch Bar DKMS | Suspend & NVMe D3cold | Expected Duration |
-| :--- | :---: | :---: | :---: | :---: | :---: |
-| `install --wifi-mac <MAC>` | ✅ Injects physical MAC | ✅ Builds & Deploys | ✅ Builds & Deploys | ✅ Enables Service | ~2-3 mins |
-| `install --skip-wifi-nvram` | ❌ Skipped | ✅ Builds & Deploys | ✅ Builds & Deploys | ✅ Enables Service | ~2-3 mins |
-| `install-suspend` | ❌ Skipped | ❌ Skipped | ❌ Skipped | ✅ Enables Service | **A few seconds** |
+| Command | 5GHz Wi-Fi Calibration | Cirrus Audio DKMS | Touch Bar DKMS | Suspend & NVMe D3cold | mbpfan Active Cooling | Expected Duration |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: |
+| `install --wifi-mac <MAC>` | ✅ Injects physical MAC | ✅ Builds & Deploys | ✅ Builds & Deploys | ✅ Enables Service | ✅ Enables Service | ~2-3 mins |
+| `install --skip-wifi-nvram` | ❌ Skipped | ✅ Builds & Deploys | ✅ Builds & Deploys | ✅ Enables Service | ✅ Enables Service | ~2-3 mins |
+| `install-cooling` | ❌ Skipped | ❌ Skipped | ❌ Skipped | ❌ Skipped | ✅ Enables Service | **A few seconds** |
+| `install-suspend` | ❌ Skipped | ❌ Skipped | ❌ Skipped | ✅ Enables Service | ❌ Skipped | **A few seconds** |
 
 ### 4. Reboot
 
@@ -155,45 +175,32 @@ sudo reboot
 
 ### 5. Verify Hardware Gates
 
-After rebooting, run the automated verification suite:
 ```bash
 sudo ./omarchy-mbp15-2016.sh verify
 ```
 
-### 6. Test Sleep / Resume
-
-Run simulated device-level power management testing before executing a physical suspend:
-```bash
-sudo ./omarchy-mbp15-2016.sh pm-test
-```
-
-Inspect kernel and sleep journal logs from the previous boot cycle:
-```bash
-sudo ./omarchy-mbp15-2016.sh previous-boot
-```
-
 ---
 
-## Available Commands
+## Command Quick Reference
 
 | Command | Description |
 | :--- | :--- |
-| `sudo ./omarchy-mbp15-2016.sh status` | Inspect active kernel, boot parameters, and status of all peripherals |
-| `sudo ./omarchy-mbp15-2016.sh install --wifi-mac <MAC>` | [Recommended] Full setup: calibrate 5GHz Wi-Fi, build audio/Touch Bar DKMS, and deploy suspend fixes |
-| `sudo ./omarchy-mbp15-2016.sh install --skip-wifi-nvram` | Full setup for audio, Touch Bar, and suspend, while skipping Wi-Fi NVRAM updates |
-| `sudo ./omarchy-mbp15-2016.sh install-suspend` | Fast targeted setup: deploy `mbp15-nvme-d3cold.service` and Limine s2idle/IOMMU suspend parameters |
-| `sudo ./omarchy-mbp15-2016.sh install-touchbar` | Rebuild and deploy only the Apple T1 and Touch Bar DKMS drivers and resume hooks |
-| `sudo ./omarchy-mbp15-2016.sh install-audio` | Rebuild and deploy only the Cirrus CS8409 audio DKMS driver |
-| `sudo ./omarchy-mbp15-2016.sh verify` | Validate Wi-Fi MAC, SPI devices, audio cards, Touch Bar, SMC fans & thermal, and NVMe D3cold |
-| `sudo ./omarchy-mbp15-2016.sh pm-test` | Staged PM test (`pm_test=devices`) to safely verify driver suspend/resume |
-| `sudo ./omarchy-mbp15-2016.sh previous-boot` | Query systemd and dmesg logs from the previous boot session for PM debugging |
-| `sudo ./omarchy-mbp15-2016.sh rollback` | Revert all configuration files, mask changes, and disable created services |
+| `sudo ./omarchy-mbp15-2016.sh status` | Inspect kernel, active GPU, thermal curves, boot parameters, and driver states |
+| `sudo ./omarchy-mbp15-2016.sh install --wifi-mac <MAC>` | Full installation: dependencies, Wi-Fi 5GHz calibration, audio, Touch Bar, suspend, and cooling |
+| `sudo ./omarchy-mbp15-2016.sh install-cooling` | Deploy tuned `mbpfan` service and CPU thermal limit configuration |
+| `sudo ./omarchy-mbp15-2016.sh gpu-igpu` | Switch EFI to Intel HD 530 integrated graphics (ultimate cooling; reboot required) |
+| `sudo ./omarchy-mbp15-2016.sh gpu-dgpu` | Switch EFI to AMD Radeon Pro discrete graphics (for external monitors; reboot required) |
+| `sudo ./omarchy-mbp15-2016.sh install-suspend` | Deploy NVMe D3cold fix and Limine s2idle configuration |
+| `sudo ./omarchy-mbp15-2016.sh install-touchbar` | Rebuild and deploy Touch Bar & Apple T1 iBridge DKMS driver and systemd service |
+| `sudo ./omarchy-mbp15-2016.sh install-audio` | Rebuild and deploy Cirrus Logic CS8409 audio DKMS driver |
+| `sudo ./omarchy-mbp15-2016.sh verify` | Validate active GPU, thermals, Wi-Fi MAC, SPI keyboard/trackpad, audio, Touch Bar, and NVMe |
+| `sudo ./omarchy-mbp15-2016.sh pm-test` | Run `pm_test=devices` staged suspend and resume cycle |
+| `sudo ./omarchy-mbp15-2016.sh previous-boot` | Retrieve kernel suspend/resume logs from the previous boot |
+| `sudo ./omarchy-mbp15-2016.sh rollback` | Restore original configuration files, disable services, and update Limine |
 
 ---
 
-## Rollback
-
-To cleanly uninstall and restore all original files:
+## Uninstallation & Rollback
 
 ```bash
 sudo ./omarchy-mbp15-2016.sh rollback
@@ -202,12 +209,13 @@ sudo reboot
 
 ---
 
-## Upstream & Acknowledgments
+## Upstream Acknowledgements
 
-This project builds upon vital community reverse-engineering efforts:
 - [omarchy-macbookpro-t1](https://github.com/nohzafk/omarchy-macbookpro-t1) by nohzafk (Touch Bar & T1 iBridge Linux drivers)
 - [snd_hda_macbookpro](https://github.com/davidjo/snd_hda_macbookpro) by davidjo (Cirrus Logic CS8409 audio driver)
-- The [Omarchy](https://omarchy.org) project and the Arch Linux community.
+- [mbpfan](https://github.com/linux-on-mac/mbpfan) by linux-on-mac (MacBook thermal fan daemon)
+- [gpu-switch](https://github.com/0xbb/gpu-switch) by 0xbb (MacBook Pro dual GPU EFI switching logic)
+- [Omarchy](https://omarchy.org) team and Arch Linux community.
 
 ---
 

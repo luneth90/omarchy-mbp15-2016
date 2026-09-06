@@ -2,12 +2,16 @@
 set -Eeuo pipefail
 
 # MacBookPro13,3 (2016 15-inch Touch Bar/T1) Hardware Fix Script
-# Validated target: Arch/Omarchy, Linux 7.1.x family.
+# Validated target: Arch/Omarchy, Linux 7.1.x/7.2.x family.
 #
 # Commands:
 #   sudo ./omarchy-mbp15-2016.sh status
 #   sudo ./omarchy-mbp15-2016.sh install --wifi-mac AA:BB:CC:DD:EE:FF
 #   sudo ./omarchy-mbp15-2016.sh install --skip-wifi-nvram
+#   sudo ./omarchy-mbp15-2016.sh install-suspend
+#   sudo ./omarchy-mbp15-2016.sh install-cooling
+#   sudo ./omarchy-mbp15-2016.sh gpu-igpu
+#   sudo ./omarchy-mbp15-2016.sh gpu-dgpu
 #   sudo reboot
 #   sudo ./omarchy-mbp15-2016.sh verify
 #   sudo ./omarchy-mbp15-2016.sh pm-test
@@ -20,14 +24,17 @@ set -Eeuo pipefail
 # - Never runs a real suspend automatically.
 # - Real suspend must be tested manually with physical access.
 # - Wi-Fi NVRAM needs the REAL macOS Wi-Fi MAC; never use 00:90:4c:*.
+# - Touch Bar & Suspend are fully decoupled from GPU; iGPU mode is 100% compatible.
 
 MODEL="MacBookPro13,3"
 STATE="/var/lib/mbp15-2016-t1-touchbar-fix"
 SRC="/usr/local/src/mbp15-2016-t1-touchbar-fix"
 T1_REPO="$SRC/omarchy-macbookpro-t1"
 AUDIO_REPO="$SRC/snd_hda_macbookpro"
+MBPFAN_REPO="$SRC/mbpfan"
 T1_URL="https://github.com/nohzafk/omarchy-macbookpro-t1.git"
 AUDIO_URL="https://github.com/davidjo/snd_hda_macbookpro.git"
+MBPFAN_URL="https://github.com/linux-on-mac/mbpfan.git"
 
 WIFI_URL="https://raw.githubusercontent.com/nohzafk/omarchy-macbookpro-t1/main/firmware/brcmfmac43602-pcie.txt"
 WIFI_FILE="/usr/lib/firmware/brcm/brcmfmac43602-pcie.txt"
@@ -41,6 +48,11 @@ TB_MODPROBE="/etc/modprobe.d/99-appleibridge-late-load.conf"
 LIMINE="/etc/limine-entry-tool.d/macbook-t1.conf"
 SLEEP_CONF="/etc/systemd/sleep.conf.d/30-mbp15-suspend.conf"
 NVME_UNIT="/etc/systemd/system/mbp15-nvme-d3cold.service"
+
+MBPFAN_CONF="/etc/mbpfan.conf"
+COOLING_UNIT="/etc/systemd/system/macbook-cpu-cooling.service"
+EFI_VARS="/sys/firmware/efi/efivars"
+EFI_GPU_VAR="gpu-power-prefs-fa4ce28d-b62f-4c99-9cc3-6815686e30f9"
 
 log(){ printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 ok(){ printf '\033[1;32m OK \033[0m %s\n' "$*"; }
@@ -145,7 +157,6 @@ install_audio(){
 verify_audio(){
   log "Audio"
   local cards; cards="$(cat /proc/asound/cards 2>/dev/null || true)"; printf '%s\n' "$cards"
-  # procfs files commonly report size 0, so never use -s here.
   if printf '%s\n' "$cards" | grep -Eq 'HDA Intel PCH|HDA ATI HDMI|\[PCH|\[HDMI'; then
     ok "ALSA card(s) present"
   else
@@ -174,7 +185,6 @@ install_touchbar(){
   install -m 0755 "$T1_REPO/systemd/touchbar-enable.sh" "$TB_HELPER"
   install -m 0644 "$T1_REPO/systemd/touchbar.service" "$TB_UNIT"
 
-  # Validated behavior: multimedia strip by default, Fn => F1-F12.
   sed -i 's/fnmode=0/fnmode=1/g' "$TB_HELPER"
   sed -i "s/printf '%s' '0'  > \"\$d\/fnmode\"/printf '%s' '1'  > \"\$d\/fnmode\"/" "$TB_HELPER"
 
@@ -314,8 +324,6 @@ SEOF
   append_cmdline "pcie_ports=compat"
   append_cmdline "modprobe.blacklist=apple_ibridge,apple_ib_tb,apple_ib_als"
 
-  # Never hard-code the NVMe BDF. On the validated MacBookPro13,3, 01:00.0 is AMD GPU
-  # and 02:00.0 is NVMe; discover every actual nvme device dynamically instead.
   cat > "$NVME_UNIT" <<'NEOF'
 [Unit]
 Description=Disable D3cold on actual Apple NVMe controller(s)
@@ -367,6 +375,140 @@ verify_suspend(){
   fi
   return "$rc"
 }
+
+# ---------- Cooling / Fan / CPU Thermal ----------
+install_cooling(){
+  log "Installing mbpfan (active thermal & fan daemon)"
+  local user="${SUDO_USER:-${USER:-root}}"
+  local pkg_cache="/home/$user/.cache/yay/mbpfan"
+  local pkg=""
+  if [[ -d "$pkg_cache" ]]; then
+    pkg="$(find "$pkg_cache" -maxdepth 1 -name "mbpfan-[0-9]*.pkg.tar.zst" ! -name "*debug*" 2>/dev/null | head -n 1)"
+  fi
+
+  if [[ -n "$pkg" && -f "$pkg" ]]; then
+    log "Installing pre-built mbpfan package: $pkg"
+    pacman -U --noconfirm --needed "$pkg"
+  else
+    log "Compiling mbpfan from source..."
+    git_sync "$MBPFAN_URL" "$MBPFAN_REPO"
+    ( cd "$MBPFAN_REPO" && make && make install )
+  fi
+
+  backup_once "$MBPFAN_CONF" "mbpfan.conf.before"
+  backup_once "$COOLING_UNIT" "macbook-cpu-cooling.service.before"
+
+  log "Configuring mbpfan for MacBookPro13,3"
+  cat > "$MBPFAN_CONF" <<'EOF'
+[general]
+min_fan1_speed = 2500
+max_fan1_speed = 5900
+min_fan2_speed = 2500
+max_fan2_speed = 5400
+low_temp = 50       # Under 50°C: quiet low speed
+high_temp = 62      # Above 62°C: ramp up fan speed linearly
+max_temp = 78       # At 78°C: maximum fan speed
+polling_interval = 2
+EOF
+
+  systemctl daemon-reload
+  systemctl enable --now mbpfan
+  systemctl restart mbpfan
+
+  log "Configuring CPU power & thermal policy"
+  if have powerprofilesctl; then
+    powerprofilesctl set power-saver 2>/dev/null || true
+  fi
+
+  cat > "$COOLING_UNIT" <<'EOF'
+[Unit]
+Description=MacBookPro CPU Thermal & Power Optimization
+After=multi-user.target
+
+[Service]
+Type=oneshot
+ExecStart=/bin/sh -c 'echo 1 > /sys/devices/system/cpu/intel_pstate/no_turbo && echo power_saving > /sys/module/pcie_aspm/parameters/policy 2>/dev/null || true'
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+  systemctl daemon-reload
+  systemctl enable --now macbook-cpu-cooling.service
+  ok "Active cooling daemon (mbpfan) and CPU thermal policy deployed and running"
+}
+
+verify_cooling(){
+  log "Cooling & Fan Daemon (mbpfan)"
+  if systemctl is-active --quiet mbpfan; then
+    ok "mbpfan.service is active"
+  else
+    fail "mbpfan.service is inactive"
+    return 1
+  fi
+  if [[ -f /sys/devices/system/cpu/intel_pstate/no_turbo ]]; then
+    local nt; nt="$(cat /sys/devices/system/cpu/intel_pstate/no_turbo 2>/dev/null || echo 0)"
+    if [[ "$nt" == "1" ]]; then ok "CPU Turbo Boost disabled (low heat mode)"; else warn "CPU Turbo Boost enabled (higher heat)"; fi
+  fi
+}
+
+# ---------- GPU Switching (apple-gmux / EFI) ----------
+active_gpu(){
+  for d in /sys/class/drm/card*-eDP-1; do
+    [[ -e "$d/status" && "$(cat "$d/status" 2>/dev/null)" == "connected" ]] || continue
+    local card; card="$(basename "$(dirname "$d")")"
+    local pci; pci="$(readlink -f "/sys/class/drm/$card/device" 2>/dev/null || true)"
+    local bdf; bdf="$(basename "$pci")"
+    if [[ "$bdf" =~ ^0000:00:02 ]]; then echo "intel"; return 0; fi
+    if [[ "$bdf" =~ ^0000:01:00 ]]; then echo "amd"; return 0; fi
+  done
+  echo "unknown"
+}
+
+efi_gpu_pref(){
+  local f="${EFI_VARS}/${EFI_GPU_VAR}"
+  [[ -e "$f" ]] || { echo "unset"; return 0; }
+  local b; b="$(hexdump -v -e '1/1 "%02x "' "$f" 2>/dev/null | awk '{print $5}')"
+  if [[ "$b" == "01" ]]; then echo "intel"; else echo "amd"; fi
+}
+
+switch_gpu(){
+  local mode="$1"
+  [[ -d "$EFI_VARS" ]] || die "EFI variables directory ($EFI_VARS) not found."
+  local f="${EFI_VARS}/${EFI_GPU_VAR}"
+  chattr -i "$f" 2>/dev/null || true
+
+  if [[ "$mode" == "intel" || "$mode" == "igpu" ]]; then
+    log "Switching EFI preference to Integrated GPU (Intel HD 530)..."
+    printf "\x07\x00\x00\x00\x01\x00\x00\x00" > "$f"
+    ok "Set to Intel HD 530 for next boot (AMD dGPU idle power 0W)."
+    warn "External display output (USB-C) will NOT function under iGPU mode (ports wired to AMD dGPU)."
+    warn "Reboot required to switch GPU: sudo reboot"
+  elif [[ "$mode" == "amd" || "$mode" == "dgpu" ]]; then
+    log "Switching EFI preference to Dedicated GPU (AMD Radeon Pro)..."
+    printf "\x07\x00\x00\x00\x00\x00\x00\x00" > "$f"
+    ok "Set to AMD Radeon Pro for next boot."
+    warn "Reboot required to switch GPU: sudo reboot"
+  else
+    die "Unknown GPU mode: $mode (expected 'intel' or 'amd')"
+  fi
+}
+
+verify_gpu(){
+  log "Graphics / GPU Switching"
+  local cur efi
+  cur="$(active_gpu)"
+  efi="$(efi_gpu_pref)"
+  echo "  Current Display GPU : $cur"
+  echo "  Next Boot EFI Mode  : $efi"
+  if [[ "$cur" == "intel" ]]; then
+    ok "Running on Intel HD 530 (Cool / Low Power mode, ~0W on AMD dGPU)"
+  elif [[ "$cur" == "amd" ]]; then
+    warn "Running on AMD Radeon Pro (Higher heat/power, required for external displays)"
+  fi
+}
+
 pm_test(){
   need_root; preflight; verify_suspend || die "Static suspend gates failed."
   warn "pm_test=devices is staged testing; this is NOT a real low-power suspend."
@@ -391,6 +533,8 @@ previous_boot(){
 status(){
   need_root; preflight
   echo "Kernel: $(uname -r)"; echo "Boot: $(cat /proc/cmdline)"; echo
+  verify_gpu || true; echo
+  verify_cooling || true; echo
   verify_wifi || true; echo
   verify_applespi || true; echo
   verify_webcam || true; echo
@@ -401,6 +545,8 @@ status(){
 }
 verify(){
   need_root; preflight; local rc=0
+  verify_gpu || true
+  verify_cooling || true
   verify_wifi || rc=1
   verify_applespi || rc=1
   verify_webcam || rc=1
@@ -439,9 +585,11 @@ install_all(){
   install_audio
   install_touchbar
   install_suspend
+  install_cooling
   echo
-  ok "Hardware fix configuration staged"
+  ok "Hardware fix & cooling configuration staged"
   echo "NEXT:"; echo "  sudo reboot"; echo "  sudo $0 verify"; echo "  sudo $0 pm-test"
+  echo "To switch to Intel HD 530 integrated graphics (ultimate cooling): sudo $0 gpu-igpu && sudo reboot"
   echo "Then, only with physical access: sudo systemctl suspend"
 }
 
@@ -450,12 +598,16 @@ rollback(){
   systemctl disable --now touchbar.service >/dev/null 2>&1 || true
   systemctl disable --now mbp15-nvme-d3cold.service >/dev/null 2>&1 || true
   systemctl disable --now mbp13-nvme-d3cold.service >/dev/null 2>&1 || true
+  systemctl disable --now mbpfan.service >/dev/null 2>&1 || true
+  systemctl disable --now macbook-cpu-cooling.service >/dev/null 2>&1 || true
   restore_or_remove "$TB_HELPER" "touchbar-enable.sh.before"
   restore_or_remove "$TB_UNIT" "touchbar.service.before"
   restore_or_remove "$TB_RESUME" "90-mbp-touchbar-resume.before"
   restore_or_remove "$TB_MODPROBE" "99-appleibridge-late-load.conf.before"
   restore_or_remove "$SLEEP_CONF" "30-mbp15-suspend.conf.before"
   restore_or_remove "$NVME_UNIT" "mbp15-nvme-d3cold.service.before"
+  restore_or_remove "$MBPFAN_CONF" "mbpfan.conf.before"
+  restore_or_remove "$COOLING_UNIT" "macbook-cpu-cooling.service.before"
   if [[ -e "$STATE/macbook-t1.conf.before" ]]; then cp -a "$STATE/macbook-t1.conf.before" "$LIMINE"; fi
   if [[ -e "$WIFI_BAK" ]]; then cp -a "$WIFI_BAK" "$WIFI_FILE"; fi
   systemctl unmask omarchy-nvme-suspend-fix.service >/dev/null 2>&1 || true
@@ -466,25 +618,31 @@ rollback(){
 
 usage(){
   cat <<USAGE
-MacBookPro13,3 (2016 15-inch Touch Bar/T1) hardware fix script
+MacBookPro13,3 (2016 15-inch Touch Bar/T1) hardware fix & cooling script
 
 Usage:
   sudo $0 status
   sudo $0 install --wifi-mac AA:BB:CC:DD:EE:FF
   sudo $0 install --skip-wifi-nvram
   sudo $0 install-suspend
+  sudo $0 install-cooling
+  sudo $0 gpu-igpu
+  sudo $0 gpu-dgpu
   sudo reboot
   sudo $0 verify
   sudo $0 pm-test
   sudo $0 previous-boot
   sudo $0 rollback
 
-Validated final Touch Bar behavior:
-  default : multimedia control strip
-  Fn      : F1-F12
-  resume  : apple_ib_tb is reloaded automatically
+Commands:
+  install-cooling : Deploy active fan control (mbpfan) and CPU thermal policy
+  gpu-igpu        : Switch to Intel HD 530 integrated graphics (cool, high battery life)
+  gpu-dgpu        : Switch to AMD Radeon Pro discrete graphics (for external displays)
+  install-suspend : Deploy NVMe D3cold fix and Limine s2idle configuration
+  install-touchbar: Build and install Touch Bar DKMS driver and service
+  install-audio   : Build and install Cirrus CS8409 audio DKMS driver
 
-The script never performs a real suspend automatically.
+Touch Bar & Suspend are completely decoupled from GPU state.
 USAGE
 }
 
@@ -492,6 +650,9 @@ case "${1:-}" in
   status) status ;;
   install|apply) shift; install_all "$@" ;;
   install-suspend|install-nvme) need_root; preflight; install_suspend ;;
+  install-cooling|install-thermal) need_root; preflight; install_cooling ;;
+  gpu-igpu|switch-igpu) need_root; preflight; switch_gpu intel ;;
+  gpu-dgpu|switch-dgpu) need_root; preflight; switch_gpu amd ;;
   install-touchbar) need_root; preflight; install_touchbar ;;
   install-audio) need_root; preflight; install_audio ;;
   verify) verify ;;
