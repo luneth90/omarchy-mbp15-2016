@@ -427,7 +427,7 @@ After=multi-user.target
 
 [Service]
 Type=oneshot
-ExecStart=/bin/sh -c 'echo 1 > /sys/devices/system/cpu/intel_pstate/no_turbo && echo power_saving > /sys/module/pcie_aspm/parameters/policy 2>/dev/null || true'
+ExecStart=/bin/sh -c 'echo 1 > /sys/devices/system/cpu/intel_pstate/no_turbo && echo powersave > /sys/module/pcie_aspm/parameters/policy 2>/dev/null || true; echo auto > /sys/bus/pci/devices/0000:01:00.0/power/control 2>/dev/null || true; echo auto > /sys/bus/pci/devices/0000:01:00.1/power/control 2>/dev/null || true'
 RemainAfterExit=yes
 
 [Install]
@@ -455,11 +455,16 @@ verify_cooling(){
 
 # ---------- GPU Switching (apple-gmux / EFI) ----------
 active_gpu(){
-  for d in /sys/class/drm/card*-eDP-1; do
+  local d conn card pci bdf edid
+  for d in /sys/class/drm/card*-eDP-*; do
     [[ -e "$d/status" && "$(cat "$d/status" 2>/dev/null)" == "connected" ]] || continue
-    local card; card="$(basename "$(dirname "$d")")"
-    local pci; pci="$(readlink -f "/sys/class/drm/$card/device" 2>/dev/null || true)"
-    local bdf; bdf="$(basename "$pci")"
+    edid="$(head -c 4 "$d/edid" 2>/dev/null | wc -c)"
+    # Filter out phantom connected connectors with no valid EDID
+    (( edid > 0 )) || continue
+    conn="$(basename "$d")"
+    card="${conn%%-*}"
+    pci="$(readlink -f "/sys/class/drm/$card/device" 2>/dev/null || true)"
+    bdf="$(basename "$pci")"
     if [[ "$bdf" =~ ^0000:00:02 ]]; then echo "intel"; return 0; fi
     if [[ "$bdf" =~ ^0000:01:00 ]]; then echo "amd"; return 0; fi
   done
