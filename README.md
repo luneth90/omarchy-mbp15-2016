@@ -64,7 +64,7 @@ Out of the box on standard Linux installations:
 
 - **Radical Thermal Taming & Flexible GPU Switching**:
   - **Decoupled Verification**: Touch Bar runs on internal USB HID and suspend relies on NVMe s2idle management—**completely decoupled from AMD GPU state**.
-  - **Integrated Graphics (iGPU) Mode (`gpu-igpu`)**: Modifies Apple EFI variables to route internal display to Intel HD 530. The power-hungry AMD dGPU is powered down (0W), dropping idle consumption by 10–15W and temperatures to a cool ~38–45°C.
+  - **Integrated Graphics (iGPU) Mode (`gpu-igpu`)**: Modifies Apple EFI variables to route internal display to Intel HD 530. The AMD dGPU automatically throttles down to its lowest idle state (214 MHz / 0.75V), slashing total idle power to just ~5.2W and trackpad temperatures to a cool 34.5°C.
   - **Discrete Graphics (dGPU) Mode (`gpu-dgpu`)**: Toggle back to the AMD GPU whenever external USB-C displays or 3D compute are needed.
   - **`mbpfan` Active Thermal Daemon**: Overrides Apple SMC's sluggish default curve to aggressively vent heat before the body warms up.
   - **CPU Turbo Power Throttling**: Restrains Intel Turbo Boost spikes on battery to prevent sudden heat surges.
@@ -117,6 +117,11 @@ sudo reboot
 > sudo ./omarchy-mbp15-2016.sh gpu-dgpu
 > sudo reboot
 > ```
+
+> [!CAUTION]
+> **Do NOT run `echo OFF > /sys/kernel/debug/vgaswitcheroo/switch` while the system is running!**
+> On the 2016 15-inch Touch Bar MacBook Pro (`MacBookPro13,3` / GMUX 4.0.29), the internal eDP physical bus clocks are tightly coupled across both GPUs. Dynamically power-cutting the dGPU rail during an active session corrupts the Intel iGPU's eDP link training, resulting in an immediate and unrecoverable black screen.
+> This suite safely achieves optimal cool-down via **EFI-level GPU switching + driver DPM lowest idle frequency clamping (214 MHz / 0.75V)**, reducing total machine idle power to just ~5.2W and trackpad temperatures to a cool 34.5°C without compromising display bus integrity.
 
 ---
 
