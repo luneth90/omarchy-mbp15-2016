@@ -427,7 +427,7 @@ After=multi-user.target
 
 [Service]
 Type=oneshot
-ExecStart=/bin/sh -c 'echo 1 > /sys/devices/system/cpu/intel_pstate/no_turbo 2>/dev/null || true; echo powersave > /sys/module/pcie_aspm/parameters/policy 2>/dev/null || true; echo auto > /sys/bus/pci/devices/0000:01:00.0/power/control 2>/dev/null || true; echo auto > /sys/bus/pci/devices/0000:01:00.1/power/control 2>/dev/null || true'
+ExecStart=/bin/sh -c 'echo 1 > /sys/devices/system/cpu/intel_pstate/no_turbo 2>/dev/null || true; powerprofilesctl set power-saver 2>/dev/null || true'
 RemainAfterExit=yes
 
 [Install]
