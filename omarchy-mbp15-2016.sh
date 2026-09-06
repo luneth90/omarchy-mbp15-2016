@@ -6,8 +6,8 @@ set -Eeuo pipefail
 #
 # Commands:
 #   sudo ./omarchy-mbp15-2016.sh status
-#   sudo ./omarchy-mbp15-2016.sh install --wifi-mac AA:BB:CC:DD:EE:FF
-#   sudo ./omarchy-mbp15-2016.sh install --skip-wifi-nvram
+#   sudo ./omarchy-mbp15-2016.sh install --wifi-mac AA:BB:CC:DD:EE:FF [--switch-igpu]
+#   sudo ./omarchy-mbp15-2016.sh install --skip-wifi-nvram [--switch-igpu]
 #   sudo ./omarchy-mbp15-2016.sh install-suspend
 #   sudo ./omarchy-mbp15-2016.sh install-cooling
 #   sudo ./omarchy-mbp15-2016.sh gpu-igpu
@@ -436,7 +436,45 @@ EOF
 
   systemctl daemon-reload
   systemctl enable --now macbook-cpu-cooling.service
-  ok "Active cooling daemon (mbpfan) and CPU thermal policy deployed and running"
+
+  log "Configuring graphics environment & disabling phantom display"
+  append_cmdline "video=eDP-2:d"
+  have limine-update && limine-update || true
+
+  local user="${SUDO_USER:-${USER:-root}}"
+  local user_home
+  user_home="$(getent passwd "$user" | cut -d: -f6)"
+  if [[ -n "$user_home" && -d "$user_home" && "$user" != "root" ]]; then
+    local env_dir="$user_home/.config/environment.d"
+    install -d -m 0755 -o "$user" -g "$user" "$env_dir"
+    cat > "$env_dir/10-graphics.conf" <<'EOF'
+AQ_DRM_DEVICES=/dev/dri/by-path/pci-0000:00:02.0-card
+EOF
+    chown "$user:$user" "$env_dir/10-graphics.conf"
+
+    local mon_file="$user_home/.config/hypr/monitors.lua"
+    if [[ -f "$mon_file" ]]; then
+      if ! grep -q 'output = "eDP-2"' "$mon_file"; then
+        if grep -q 'local omarchy_monitor_scale' "$mon_file"; then
+          sed -i '/local omarchy_monitor_scale/a hl.monitor({ output = "eDP-2", disabled = true })\nhl.monitor({ output = "eDP-1", mode = "preferred", position = "0x0", scale = omarchy_monitor_scale })' "$mon_file"
+        else
+          echo 'hl.monitor({ output = "eDP-2", disabled = true })' >> "$mon_file"
+        fi
+        chown "$user:$user" "$mon_file"
+      fi
+    fi
+
+    local hypr_file="$user_home/.config/hypr/hyprland.lua"
+    if [[ -f "$hypr_file" ]] && ! grep -q 'AQ_DRM_DEVICES' "$hypr_file"; then
+      if grep -q 'require("default.hypr.omarchy")' "$hypr_file"; then
+        sed -i '/require("default.hypr.omarchy")/a hl.env("AQ_DRM_DEVICES", "/dev/dri/by-path/pci-0000:00:02.0-card")' "$hypr_file"
+      else
+        echo 'hl.env("AQ_DRM_DEVICES", "/dev/dri/by-path/pci-0000:00:02.0-card")' >> "$hypr_file"
+      fi
+      chown "$user:$user" "$hypr_file"
+    fi
+  fi
+  ok "Active cooling daemon (mbpfan), thermal policy, and display configs deployed"
 }
 
 verify_cooling(){
@@ -484,15 +522,48 @@ switch_gpu(){
   local f="${EFI_VARS}/${EFI_GPU_VAR}"
   chattr -i "$f" 2>/dev/null || true
 
+  local user="${SUDO_USER:-${USER:-root}}"
+  local user_home
+  user_home="$(getent passwd "$user" | cut -d: -f6)"
+
   if [[ "$mode" == "intel" || "$mode" == "igpu" ]]; then
     log "Switching EFI preference to Integrated GPU (Intel HD 530)..."
     printf "\x07\x00\x00\x00\x01\x00\x00\x00" > "$f"
+
+    if [[ -n "$user_home" && -d "$user_home" && "$user" != "root" ]]; then
+      local env_dir="$user_home/.config/environment.d"
+      install -d -m 0755 -o "$user" -g "$user" "$env_dir"
+      echo 'AQ_DRM_DEVICES=/dev/dri/by-path/pci-0000:00:02.0-card' > "$env_dir/10-graphics.conf"
+      chown "$user:$user" "$env_dir/10-graphics.conf"
+      local hypr_file="$user_home/.config/hypr/hyprland.lua"
+      if [[ -f "$hypr_file" ]] && ! grep -q 'AQ_DRM_DEVICES' "$hypr_file"; then
+        if grep -q 'require("default.hypr.omarchy")' "$hypr_file"; then
+          sed -i '/require("default.hypr.omarchy")/a hl.env("AQ_DRM_DEVICES", "/dev/dri/by-path/pci-0000:00:02.0-card")' "$hypr_file"
+        else
+          echo 'hl.env("AQ_DRM_DEVICES", "/dev/dri/by-path/pci-0000:00:02.0-card")' >> "$hypr_file"
+        fi
+        chown "$user:$user" "$hypr_file"
+      fi
+    fi
+
     ok "Set to Intel HD 530 for next boot (AMD dGPU idle power 0W)."
     warn "External display output (USB-C) will NOT function under iGPU mode (ports wired to AMD dGPU)."
     warn "Reboot required to switch GPU: sudo reboot"
   elif [[ "$mode" == "amd" || "$mode" == "dgpu" ]]; then
     log "Switching EFI preference to Dedicated GPU (AMD Radeon Pro)..."
     printf "\x07\x00\x00\x00\x00\x00\x00\x00" > "$f"
+
+    if [[ -n "$user_home" && -d "$user_home" && "$user" != "root" ]]; then
+      local env_dir="$user_home/.config/environment.d"
+      if [[ -f "$env_dir/10-graphics.conf" ]]; then
+        rm -f "$env_dir/10-graphics.conf"
+      fi
+      local hypr_file="$user_home/.config/hypr/hyprland.lua"
+      if [[ -f "$hypr_file" ]]; then
+        sed -i '/AQ_DRM_DEVICES/d' "$hypr_file"
+      fi
+    fi
+
     ok "Set to AMD Radeon Pro for next boot."
     warn "Reboot required to switch GPU: sudo reboot"
   else
@@ -571,11 +642,12 @@ verify(){
 
 install_all(){
   need_root; preflight
-  local mac="" skip=0
+  local mac="" skip=0 switch_igpu=0
   while (($#)); do
     case "$1" in
       --wifi-mac) shift; (($#)) || die "--wifi-mac requires an address"; mac="$1" ;;
       --skip-wifi-nvram) skip=1 ;;
+      --switch-igpu|--igpu) switch_igpu=1 ;;
       *) die "Unknown argument: $1" ;;
     esac
     shift
@@ -591,10 +663,15 @@ install_all(){
   install_touchbar
   install_suspend
   install_cooling
+  if (( switch_igpu )); then
+    switch_gpu intel
+  fi
   echo
-  ok "Hardware fix & cooling configuration staged"
+  ok "Hardware fix, cooling, and graphics configuration staged"
   echo "NEXT:"; echo "  sudo reboot"; echo "  sudo $0 verify"; echo "  sudo $0 pm-test"
-  echo "To switch to Intel HD 530 integrated graphics (ultimate cooling): sudo $0 gpu-igpu && sudo reboot"
+  if (( ! switch_igpu )); then
+    echo "To switch to Intel HD 530 integrated graphics (ultimate cooling): sudo $0 gpu-igpu && sudo reboot"
+  fi
   echo "Then, only with physical access: sudo systemctl suspend"
 }
 
@@ -615,6 +692,16 @@ rollback(){
   restore_or_remove "$COOLING_UNIT" "macbook-cpu-cooling.service.before"
   if [[ -e "$STATE/macbook-t1.conf.before" ]]; then cp -a "$STATE/macbook-t1.conf.before" "$LIMINE"; fi
   if [[ -e "$WIFI_BAK" ]]; then cp -a "$WIFI_BAK" "$WIFI_FILE"; fi
+
+  local user="${SUDO_USER:-${USER:-root}}"
+  local user_home
+  user_home="$(getent passwd "$user" | cut -d: -f6)"
+  if [[ -n "$user_home" && -d "$user_home" && "$user" != "root" ]]; then
+    rm -f "$user_home/.config/environment.d/10-graphics.conf"
+    sed -i '/AQ_DRM_DEVICES/d' "$user_home/.config/hypr/hyprland.lua" 2>/dev/null || true
+    sed -i '/eDP-2/d' "$user_home/.config/hypr/monitors.lua" 2>/dev/null || true
+  fi
+
   systemctl unmask omarchy-nvme-suspend-fix.service >/dev/null 2>&1 || true
   systemctl daemon-reload
   have limine-update && limine-update || true
@@ -627,8 +714,8 @@ MacBookPro13,3 (2016 15-inch Touch Bar/T1) hardware fix & cooling script
 
 Usage:
   sudo $0 status
-  sudo $0 install --wifi-mac AA:BB:CC:DD:EE:FF
-  sudo $0 install --skip-wifi-nvram
+  sudo $0 install --wifi-mac AA:BB:CC:DD:EE:FF [--switch-igpu]
+  sudo $0 install --skip-wifi-nvram [--switch-igpu]
   sudo $0 install-suspend
   sudo $0 install-cooling
   sudo $0 gpu-igpu
@@ -638,6 +725,10 @@ Usage:
   sudo $0 pm-test
   sudo $0 previous-boot
   sudo $0 rollback
+
+Options:
+  --switch-igpu, --igpu : Immediately set EFI GPU preference to Intel HD 530 during install
+  --skip-wifi-nvram     : Keep existing Wi-Fi NVRAM configuration without re-flashing MAC
 
 Commands:
   install-cooling : Deploy active fan control (mbpfan) and CPU thermal policy

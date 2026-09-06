@@ -140,32 +140,37 @@ sudo ./omarchy-mbp15-2016.sh status
 
 The suite provides flexible installation options:
 
-#### Option A: Full Automated Installation (Recommended for first-time setup)
-Installs all dependencies, calibrates 5GHz Wi-Fi with your physical macOS MAC, builds Cirrus audio and Touch Bar DKMS drivers, and deploys suspend/NVMe services and `mbpfan` cooling:
+#### Option A: One-Shot Complete Installation (Recommended, includes thermal cool-down)
+Installs all dependencies, calibrates 5GHz Wi-Fi with your physical macOS MAC, builds Cirrus audio and Touch Bar DKMS drivers, deploys suspend/NVMe services and `mbpfan` cooling, suppresses phantom displays, and switches EFI preference to Intel HD 530 iGPU in a single command:
 ```bash
-sudo ./omarchy-mbp15-2016.sh install --wifi-mac AA:BB:CC:DD:EE:FF
+sudo ./omarchy-mbp15-2016.sh install --wifi-mac AA:BB:CC:DD:EE:FF --switch-igpu
 ```
 
+> [!NOTE]
+> If you frequently connect to external monitors, simply omit `--switch-igpu` to keep AMD dGPU output enabled. You can always toggle between iGPU and dGPU later via `gpu-igpu` and `gpu-dgpu`.
+
 #### Option B: Full Install Skipping Wi-Fi NVRAM
-Installs audio, Touch Bar, suspend fixes, and cooling, while keeping the current Wi-Fi NVRAM firmware table untouched:
+Installs audio, Touch Bar, suspend fixes, cooling, and optional iGPU switch, while keeping the current Wi-Fi NVRAM firmware table untouched:
 ```bash
-sudo ./omarchy-mbp15-2016.sh install --skip-wifi-nvram
+sudo ./omarchy-mbp15-2016.sh install --skip-wifi-nvram --switch-igpu
 ```
 
 #### Option C: Targeted Thermal Cooling Only (Fast, seconds)
-Exclusively deploys the tuned `mbpfan` fan daemon and CPU thermal power limits:
+Exclusively deploys the tuned `mbpfan` fan daemon, CPU thermal power limits, and phantom display suppression:
 ```bash
 sudo ./omarchy-mbp15-2016.sh install-cooling
 ```
 
 #### Installation Modes Comparison
 
-| Command | 5GHz Wi-Fi Calibration | Cirrus Audio DKMS | Touch Bar DKMS | Suspend & NVMe D3cold | mbpfan Active Cooling | Expected Duration |
-| :--- | :---: | :---: | :---: | :---: | :---: | :---: |
-| `install --wifi-mac <MAC>` | ✅ Injects physical MAC | ✅ Builds & Deploys | ✅ Builds & Deploys | ✅ Enables Service | ✅ Enables Service | ~2-3 mins |
-| `install --skip-wifi-nvram` | ❌ Skipped | ✅ Builds & Deploys | ✅ Builds & Deploys | ✅ Enables Service | ✅ Enables Service | ~2-3 mins |
-| `install-cooling` | ❌ Skipped | ❌ Skipped | ❌ Skipped | ❌ Skipped | ✅ Enables Service | **A few seconds** |
-| `install-suspend` | ❌ Skipped | ❌ Skipped | ❌ Skipped | ✅ Enables Service | ❌ Skipped | **A few seconds** |
+| Command | 5GHz Wi-Fi Calibration | Cirrus Audio DKMS | Touch Bar DKMS | Suspend & NVMe D3cold | mbpfan Active Cooling | EFI iGPU Switch (Cooling) | Expected Duration |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| `install ... --switch-igpu` | ✅ Injects physical MAC | ✅ Builds & Deploys | ✅ Builds & Deploys | ✅ Enables Service | ✅ Enables Service | ✅ Sets Intel HD 530 (0W dGPU) | ~2-3 mins |
+| `install --wifi-mac <MAC>` | ✅ Injects physical MAC | ✅ Builds & Deploys | ✅ Builds & Deploys | ✅ Enables Service | ✅ Enables Service | ➖ Keeps Current GPU | ~2-3 mins |
+| `install --skip-wifi-nvram` | ❌ Skipped | ✅ Builds & Deploys | ✅ Builds & Deploys | ✅ Enables Service | ✅ Enables Service | ➖ Keeps Current GPU | ~2-3 mins |
+| `install-cooling` | ❌ Skipped | ❌ Skipped | ❌ Skipped | ❌ Skipped | ✅ Enables Service | ❌ Skipped | **A few seconds** |
+| `install-suspend` | ❌ Skipped | ❌ Skipped | ❌ Skipped | ✅ Enables Service | ❌ Skipped | ❌ Skipped | **A few seconds** |
+| `gpu-igpu` | ❌ Skipped | ❌ Skipped | ❌ Skipped | ❌ Skipped | ❌ Skipped | ✅ Sets Intel HD 530 | **A few seconds** |
 
 ### 4. Reboot
 

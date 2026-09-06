@@ -141,32 +141,37 @@ sudo ./omarchy-mbp15-2016.sh status
 
 脚本提供灵活的安装模式，请根据具体需求选择执行：
 
-#### 选项 A：全量完整安装（推荐首次使用）
-一键配置所有外设（注入 macOS 物理 MAC 激活 5GHz Wi-Fi、编译 Cirrus 声卡 DKMS、编译 Apple T1 Touch Bar 驱动与服务、部署休眠防死锁服务、部署 mbpfan 散热服务）：
+#### 选项 A：一步到位全量安装（推荐首次使用，含核显退烧）
+一条命令自动完成全部硬件驱动与退烧配置（注入 macOS 物理 MAC 激活 5GHz Wi-Fi、编译 Cirrus 声卡 DKMS、编译 Apple T1 Touch Bar 驱动与服务、部署休眠防死锁服务、部署 mbpfan 散热降温与幽灵屏屏蔽，并直接切换 EFI 为 Intel 核显低温模式）：
 ```bash
-sudo ./omarchy-mbp15-2016.sh install --wifi-mac AA:BB:CC:DD:EE:FF
+sudo ./omarchy-mbp15-2016.sh install --wifi-mac AA:BB:CC:DD:EE:FF --switch-igpu
 ```
 
+> [!NOTE]
+> 如果您需要经常外接显示器，可以去掉 `--switch-igpu` 参数，安装将默认保持 AMD 独显输出。日后也可随时通过 `gpu-igpu` 和 `gpu-dgpu` 命令无缝切换。
+
 #### 选项 B：全量安装但跳过 Wi-Fi 固件更新
-执行声卡、Touch Bar、休眠及散热服务的全套安装，但保留当前 Wi-Fi NVRAM 固件不作更改：
+执行声卡、Touch Bar、休眠、散热降温及可选核显切换，但保留当前 Wi-Fi NVRAM 固件不作更改：
 ```bash
-sudo ./omarchy-mbp15-2016.sh install --skip-wifi-nvram
+sudo ./omarchy-mbp15-2016.sh install --skip-wifi-nvram --switch-igpu
 ```
 
 #### 选项 C：定向部署散热降温套件（秒级极速）
-仅部署针对 MBP13,3 调优的 `mbpfan` 风扇温控曲线与 CPU 功耗限制：
+仅部署针对 MBP13,3 调优的 `mbpfan` 风扇温控曲线、CPU 功耗限制与幽灵屏屏蔽配置：
 ```bash
 sudo ./omarchy-mbp15-2016.sh install-cooling
 ```
 
 #### 安装命令功能对比
 
-| 命令 | 5GHz Wi-Fi 校准 | Cirrus 声卡驱动 | Touch Bar 驱动 | 休眠/NVMe 防死锁 | mbpfan 调优散热 | 预计耗时 |
-| :--- | :---: | :---: | :---: | :---: | :---: | :---: |
-| `install --wifi-mac <MAC>` | ✅ 注入真实 MAC | ✅ 编译部署 | ✅ 编译部署 | ✅ 部署启用 | ✅ 部署启用 | 约 2~3 分钟 |
-| `install --skip-wifi-nvram` | ❌ 跳过 | ✅ 编译部署 | ✅ 编译部署 | ✅ 部署启用 | ✅ 部署启用 | 约 2~3 分钟 |
-| `install-cooling` | ❌ 跳过 | ❌ 跳过 | ❌ 跳过 | ❌ 跳过 | ✅ 部署启用 | **数秒内** |
-| `install-suspend` | ❌ 跳过 | ❌ 跳过 | ❌ 跳过 | ✅ 部署启用 | ❌ 跳过 | **数秒内** |
+| 命令 | 5GHz Wi-Fi 校准 | Cirrus 声卡驱动 | Touch Bar 驱动 | 休眠/NVMe 防死锁 | mbpfan 调优散热 | EFI 核显切换 (退烧) | 预计耗时 |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| `install ... --switch-igpu` | ✅ 注入真实 MAC | ✅ 编译部署 | ✅ 编译部署 | ✅ 部署启用 | ✅ 部署启用 | ✅ 设为 Intel 核显 (独显 0W) | 约 2~3 分钟 |
+| `install --wifi-mac <MAC>` | ✅ 注入真实 MAC | ✅ 编译部署 | ✅ 编译部署 | ✅ 部署启用 | ✅ 部署启用 | ➖ 保持当前显卡 | 约 2~3 分钟 |
+| `install --skip-wifi-nvram` | ❌ 跳过 | ✅ 编译部署 | ✅ 编译部署 | ✅ 部署启用 | ✅ 部署启用 | ➖ 保持当前显卡 | 约 2~3 分钟 |
+| `install-cooling` | ❌ 跳过 | ❌ 跳过 | ❌ 跳过 | ❌ 跳过 | ✅ 部署启用 | ❌ 跳过 | **数秒内** |
+| `install-suspend` | ❌ 跳过 | ❌ 跳过 | ❌ 跳过 | ✅ 部署启用 | ❌ 跳过 | ❌ 跳过 | **数秒内** |
+| `gpu-igpu` | ❌ 跳过 | ❌ 跳过 | ❌ 跳过 | ❌ 跳过 | ❌ 跳过 | ✅ 设为 Intel 核显 | **数秒内** |
 
 ### 4. 重启系统
 
