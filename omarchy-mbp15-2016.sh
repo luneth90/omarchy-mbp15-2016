@@ -445,19 +445,28 @@ EOF
   local user_home
   user_home="$(getent passwd "$user" | cut -d: -f6)"
   if [[ -n "$user_home" && -d "$user_home" && "$user" != "root" ]]; then
+    local ic; ic="$(intel_card)"
+    local ac; ac="$(amd_card)"
+    local aq="$ic:$ac"
+
     local env_dir="$user_home/.config/environment.d"
     install -d -m 0755 -o "$user" -g "$user" "$env_dir"
-    cat > "$env_dir/10-graphics.conf" <<'EOF'
-AQ_DRM_DEVICES=/dev/dri/by-path/pci-0000:00:02.0-card
+    cat > "$env_dir/10-graphics.conf" <<EOF
+AQ_DRM_DEVICES=$aq
 EOF
     chown "$user:$user" "$env_dir/10-graphics.conf"
 
     local uwsm_dir="$user_home/.config/uwsm/env.d"
     install -d -m 0755 -o "$user" -g "$user" "$uwsm_dir"
-    echo 'export AQ_DRM_DEVICES=/dev/dri/by-path/pci-0000:00:02.0-card' > "$uwsm_dir/10-graphics"
+    echo "export AQ_DRM_DEVICES=$aq" > "$uwsm_dir/10-graphics"
     chown "$user:$user" "$uwsm_dir/10-graphics"
-    echo 'export AQ_DRM_DEVICES=/dev/dri/by-path/pci-0000:00:02.0-card' > "$user_home/.config/uwsm/default"
+    echo "export AQ_DRM_DEVICES=$aq" > "$user_home/.config/uwsm/default"
     chown "$user:$user" "$user_home/.config/uwsm/default"
+
+    if [[ -f /etc/environment ]]; then
+      sed -i '/AQ_DRM_DEVICES/d' /etc/environment
+      echo "AQ_DRM_DEVICES=$aq" >> /etc/environment
+    fi
 
     local mon_file="$user_home/.config/hypr/monitors.lua"
     if [[ -f "$mon_file" ]]; then
@@ -472,12 +481,9 @@ EOF
     fi
 
     local hypr_file="$user_home/.config/hypr/hyprland.lua"
-    if [[ -f "$hypr_file" ]] && ! grep -q 'AQ_DRM_DEVICES' "$hypr_file"; then
-      if grep -q 'require("default.hypr.omarchy")' "$hypr_file"; then
-        sed -i '/require("default.hypr.omarchy")/a hl.env("AQ_DRM_DEVICES", "/dev/dri/by-path/pci-0000:00:02.0-card")' "$hypr_file"
-      else
-        echo 'hl.env("AQ_DRM_DEVICES", "/dev/dri/by-path/pci-0000:00:02.0-card")' >> "$hypr_file"
-      fi
+    if [[ -f "$hypr_file" ]]; then
+      sed -i '/AQ_DRM_DEVICES/d' "$hypr_file"
+      echo "hl.env(\"AQ_DRM_DEVICES\", \"$aq\")" >> "$hypr_file"
       chown "$user:$user" "$hypr_file"
     fi
   fi
@@ -499,6 +505,25 @@ verify_cooling(){
 }
 
 # ---------- GPU Switching (apple-gmux / EFI) ----------
+intel_card(){
+  local c
+  for c in /sys/class/drm/card[0-9]; do
+    if [[ "$(readlink -f "$c/device" 2>/dev/null)" =~ 0000:00:02 ]]; then
+      echo "/dev/dri/$(basename "$c")"; return 0
+    fi
+  done
+  echo "/dev/dri/card1"
+}
+amd_card(){
+  local c
+  for c in /sys/class/drm/card[0-9]; do
+    if [[ "$(readlink -f "$c/device" 2>/dev/null)" =~ 0000:01:00 ]]; then
+      echo "/dev/dri/$(basename "$c")"; return 0
+    fi
+  done
+  echo "/dev/dri/card0"
+}
+
 active_gpu(){
   local d conn card pci bdf edid
   for d in /sys/class/drm/card*-eDP-*; do
@@ -538,23 +563,28 @@ switch_gpu(){
     printf "\x07\x00\x00\x00\x01\x00\x00\x00" > "$f"
 
     if [[ -n "$user_home" && -d "$user_home" && "$user" != "root" ]]; then
+      local ic; ic="$(intel_card)"
+      local ac; ac="$(amd_card)"
+      local aq="$ic:$ac"
+
       local env_dir="$user_home/.config/environment.d"
       install -d -m 0755 -o "$user" -g "$user" "$env_dir"
-      echo 'AQ_DRM_DEVICES=/dev/dri/by-path/pci-0000:00:02.0-card' > "$env_dir/10-graphics.conf"
+      echo "AQ_DRM_DEVICES=$aq" > "$env_dir/10-graphics.conf"
       chown "$user:$user" "$env_dir/10-graphics.conf"
       local uwsm_dir="$user_home/.config/uwsm/env.d"
       install -d -m 0755 -o "$user" -g "$user" "$uwsm_dir"
-      echo 'export AQ_DRM_DEVICES=/dev/dri/by-path/pci-0000:00:02.0-card' > "$uwsm_dir/10-graphics"
+      echo "export AQ_DRM_DEVICES=$aq" > "$uwsm_dir/10-graphics"
       chown "$user:$user" "$uwsm_dir/10-graphics"
-      echo 'export AQ_DRM_DEVICES=/dev/dri/by-path/pci-0000:00:02.0-card' > "$user_home/.config/uwsm/default"
+      echo "export AQ_DRM_DEVICES=$aq" > "$user_home/.config/uwsm/default"
       chown "$user:$user" "$user_home/.config/uwsm/default"
+      if [[ -f /etc/environment ]]; then
+        sed -i '/AQ_DRM_DEVICES/d' /etc/environment
+        echo "AQ_DRM_DEVICES=$aq" >> /etc/environment
+      fi
       local hypr_file="$user_home/.config/hypr/hyprland.lua"
-      if [[ -f "$hypr_file" ]] && ! grep -q 'AQ_DRM_DEVICES' "$hypr_file"; then
-        if grep -q 'require("default.hypr.omarchy")' "$hypr_file"; then
-          sed -i '/require("default.hypr.omarchy")/a hl.env("AQ_DRM_DEVICES", "/dev/dri/by-path/pci-0000:00:02.0-card")' "$hypr_file"
-        else
-          echo 'hl.env("AQ_DRM_DEVICES", "/dev/dri/by-path/pci-0000:00:02.0-card")' >> "$hypr_file"
-        fi
+      if [[ -f "$hypr_file" ]]; then
+        sed -i '/AQ_DRM_DEVICES/d' "$hypr_file"
+        echo "hl.env(\"AQ_DRM_DEVICES\", \"$aq\")" >> "$hypr_file"
         chown "$user:$user" "$hypr_file"
       fi
     fi
@@ -567,14 +597,24 @@ switch_gpu(){
     printf "\x07\x00\x00\x00\x00\x00\x00\x00" > "$f"
 
     if [[ -n "$user_home" && -d "$user_home" && "$user" != "root" ]]; then
+      local ic; ic="$(intel_card)"
+      local ac; ac="$(amd_card)"
+      local aq="$ac:$ic"
+
       local env_dir="$user_home/.config/environment.d"
       if [[ -f "$env_dir/10-graphics.conf" ]]; then
-        rm -f "$env_dir/10-graphics.conf"
+        echo "AQ_DRM_DEVICES=$aq" > "$env_dir/10-graphics.conf"
       fi
-      rm -f "$user_home/.config/uwsm/env.d/10-graphics" "$user_home/.config/uwsm/default"
+      echo "export AQ_DRM_DEVICES=$aq" > "$user_home/.config/uwsm/env.d/10-graphics" 2>/dev/null || true
+      echo "export AQ_DRM_DEVICES=$aq" > "$user_home/.config/uwsm/default" 2>/dev/null || true
+      if [[ -f /etc/environment ]]; then
+        sed -i '/AQ_DRM_DEVICES/d' /etc/environment
+        echo "AQ_DRM_DEVICES=$aq" >> /etc/environment
+      fi
       local hypr_file="$user_home/.config/hypr/hyprland.lua"
       if [[ -f "$hypr_file" ]]; then
         sed -i '/AQ_DRM_DEVICES/d' "$hypr_file"
+        echo "hl.env(\"AQ_DRM_DEVICES\", \"$aq\")" >> "$hypr_file"
       fi
     fi
 
