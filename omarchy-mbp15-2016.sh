@@ -452,6 +452,13 @@ AQ_DRM_DEVICES=/dev/dri/by-path/pci-0000:00:02.0-card
 EOF
     chown "$user:$user" "$env_dir/10-graphics.conf"
 
+    local uwsm_dir="$user_home/.config/uwsm/env.d"
+    install -d -m 0755 -o "$user" -g "$user" "$uwsm_dir"
+    echo 'export AQ_DRM_DEVICES=/dev/dri/by-path/pci-0000:00:02.0-card' > "$uwsm_dir/10-graphics"
+    chown "$user:$user" "$uwsm_dir/10-graphics"
+    echo 'export AQ_DRM_DEVICES=/dev/dri/by-path/pci-0000:00:02.0-card' > "$user_home/.config/uwsm/default"
+    chown "$user:$user" "$user_home/.config/uwsm/default"
+
     local mon_file="$user_home/.config/hypr/monitors.lua"
     if [[ -f "$mon_file" ]]; then
       if ! grep -q 'output = "eDP-2"' "$mon_file"; then
@@ -535,6 +542,12 @@ switch_gpu(){
       install -d -m 0755 -o "$user" -g "$user" "$env_dir"
       echo 'AQ_DRM_DEVICES=/dev/dri/by-path/pci-0000:00:02.0-card' > "$env_dir/10-graphics.conf"
       chown "$user:$user" "$env_dir/10-graphics.conf"
+      local uwsm_dir="$user_home/.config/uwsm/env.d"
+      install -d -m 0755 -o "$user" -g "$user" "$uwsm_dir"
+      echo 'export AQ_DRM_DEVICES=/dev/dri/by-path/pci-0000:00:02.0-card' > "$uwsm_dir/10-graphics"
+      chown "$user:$user" "$uwsm_dir/10-graphics"
+      echo 'export AQ_DRM_DEVICES=/dev/dri/by-path/pci-0000:00:02.0-card' > "$user_home/.config/uwsm/default"
+      chown "$user:$user" "$user_home/.config/uwsm/default"
       local hypr_file="$user_home/.config/hypr/hyprland.lua"
       if [[ -f "$hypr_file" ]] && ! grep -q 'AQ_DRM_DEVICES' "$hypr_file"; then
         if grep -q 'require("default.hypr.omarchy")' "$hypr_file"; then
@@ -558,6 +571,7 @@ switch_gpu(){
       if [[ -f "$env_dir/10-graphics.conf" ]]; then
         rm -f "$env_dir/10-graphics.conf"
       fi
+      rm -f "$user_home/.config/uwsm/env.d/10-graphics" "$user_home/.config/uwsm/default"
       local hypr_file="$user_home/.config/hypr/hyprland.lua"
       if [[ -f "$hypr_file" ]]; then
         sed -i '/AQ_DRM_DEVICES/d' "$hypr_file"
@@ -697,7 +711,7 @@ rollback(){
   local user_home
   user_home="$(getent passwd "$user" | cut -d: -f6)"
   if [[ -n "$user_home" && -d "$user_home" && "$user" != "root" ]]; then
-    rm -f "$user_home/.config/environment.d/10-graphics.conf"
+    rm -f "$user_home/.config/environment.d/10-graphics.conf" "$user_home/.config/uwsm/env.d/10-graphics" "$user_home/.config/uwsm/default"
     sed -i '/AQ_DRM_DEVICES/d' "$user_home/.config/hypr/hyprland.lua" 2>/dev/null || true
     sed -i '/eDP-2/d' "$user_home/.config/hypr/monitors.lua" 2>/dev/null || true
   fi
