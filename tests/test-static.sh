@@ -248,4 +248,17 @@ grep -Fq 'WantedBy=multi-user.target' "$GPU_FALLBACK_UNIT"
 disarm_gpu_fallback
 [[ ! -e "$GPU_FALLBACK_MARKER" && ! -e "$GPU_FALLBACK_ARMED_BOOT" && ! -e "$GPU_FALLBACK_HELPER" && ! -e "$GPU_FALLBACK_UNIT" ]]
 
+grep -Fq 'apply_immediate_cooling' <<<"$install_default_body"
+grep -Fq 'apply_immediate_cooling' <<<"$install_base_body"
+
+fake_modules="$tmp/fake_modules"
+mkdir -p "$fake_modules/fake-k/build"
+printf '%s\n' "linux-omarchy" > "$fake_modules/fake-k/pkgbase"
+running_kernel_pkgbase(){
+  local pkgbase_file="$fake_modules/fake-k/pkgbase"
+  [[ -r "$pkgbase_file" ]] && cat "$pkgbase_file"
+}
+[[ "$(running_kernel_pkgbase)" == "linux-omarchy" ]]
+
 echo "static safety tests passed"
+

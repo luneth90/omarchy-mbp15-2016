@@ -157,9 +157,55 @@ git_sync(){
   [[ "$actual" == "$ref" ]] || die "Pinned source verification failed for $url (expected $ref, got $actual)."
 }
 
+apply_immediate_cooling(){
+  log "Applying immediate CPU thermal protection (disabling Turbo Boost)"
+  if [[ -w /sys/devices/system/cpu/intel_pstate/no_turbo ]]; then
+    printf '%s\n' 1 > /sys/devices/system/cpu/intel_pstate/no_turbo 2>/dev/null || true
+  fi
+  if have powerprofilesctl; then
+    powerprofilesctl set power-saver 2>/dev/null || true
+  fi
+  modprobe applesmc 2>/dev/null || true
+  modprobe coretemp 2>/dev/null || true
+}
+
+running_kernel_pkgbase(){
+  local pkgbase_file="/usr/lib/modules/$(uname -r)/pkgbase"
+  if [[ -r "$pkgbase_file" ]]; then
+    cat "$pkgbase_file" 2>/dev/null || true
+  fi
+}
+
 require_kernel_headers(){
   local build="/usr/lib/modules/$(uname -r)/build"
-  [[ -e "$build/Makefile" ]] || die "Headers for running kernel $(uname -r) are missing at $build. Install the matching headers package; do not blindly install linux-headers for a custom kernel."
+  if [[ -e "$build/Makefile" ]]; then
+    return 0
+  fi
+
+  local pkgbase headers_pkg
+  pkgbase="$(running_kernel_pkgbase)"
+  [[ -n "$pkgbase" ]] || pkgbase="linux"
+  headers_pkg="${pkgbase}-headers"
+
+  if have pacman; then
+    log "Headers for running kernel $(uname -r) missing at $build; attempting to install matching $headers_pkg..."
+    if pacman -Si "$headers_pkg" >/dev/null 2>&1; then
+      pacman -S --needed --noconfirm "$headers_pkg" || true
+    fi
+  fi
+
+  if [[ -e "$build/Makefile" ]]; then
+    ok "Matching kernel headers ($headers_pkg) installed successfully"
+    return 0
+  fi
+
+  if have pacman && pacman -Q "$headers_pkg" >/dev/null 2>&1; then
+    local installed_ver
+    installed_ver="$(pacman -Q "$headers_pkg" 2>/dev/null | awk '{print $2}' || true)"
+    die "Headers package $headers_pkg ($installed_ver) is installed, but headers for running kernel $(uname -r) are missing at $build. The kernel was updated on disk without rebooting. Please reboot into the updated kernel and retry."
+  fi
+
+  die "Headers for running kernel $(uname -r) are missing at $build. Install matching $headers_pkg package; do not blindly install linux-headers for a custom kernel."
 }
 require_reviewed_kernel_family(){
   case "$(uname -r)" in
@@ -170,8 +216,20 @@ require_reviewed_kernel_family(){
 
 install_packages(){
   have pacman || die "pacman not found; this script targets Omarchy/Arch."
-  pacman -S --needed --noconfirm base-devel git curl wget dkms zstd patch \
+  local pkgbase headers_pkg
+  pkgbase="$(running_kernel_pkgbase)"
+  [[ -n "$pkgbase" ]] || pkgbase="linux"
+  headers_pkg="${pkgbase}-headers"
+
+  local pkgs=(
+    base-devel git curl wget dkms zstd patch
     alsa-utils pipewire wireplumber usbutils pciutils iw v4l-utils lm_sensors
+  )
+  if pacman -Si "$headers_pkg" >/dev/null 2>&1; then
+    pkgs+=("$headers_pkg")
+  fi
+
+  pacman -S --needed --noconfirm "${pkgs[@]}"
   if pacman -Q macbook12-spi-driver-dkms >/dev/null 2>&1; then
     modinfo applespi >/dev/null 2>&1 || die "Refusing to remove macbook12-spi-driver-dkms: mainline applespi is not available."
     pacman -Rns --noconfirm macbook12-spi-driver-dkms || true
@@ -223,6 +281,7 @@ verify_applespi(){
 install_audio(){
   (($# == 0)) || die "install-audio takes no arguments."
   warn "Installing required out-of-tree audio DKMS; reviewed kernel and matching-header gates remain enforced."
+  apply_immediate_cooling
   require_reviewed_kernel_family
   require_kernel_headers
   git_sync "$AUDIO_URL" "$AUDIO_REPO" "$AUDIO_REF"
@@ -248,6 +307,7 @@ verify_audio(){
 
 # ---------- Touch Bar ----------
 install_touchbar(){
+  apply_immediate_cooling
   require_reviewed_kernel_family
   require_kernel_headers
   git_sync "$T1_URL" "$T1_REPO" "$T1_REF"
@@ -487,6 +547,7 @@ EOF
 }
 
 install_mbpfan(){
+  apply_immediate_cooling
   verify_fans_thermal || die "Cooling hardware preflight failed; refusing to install mbpfan."
   backup_once "$MBPFAN_CONF" "mbpfan.conf.before"
   backup_once "$MBPFAN_UNIT" "mbpfan.service.before"
@@ -956,6 +1017,7 @@ install_default(){
   ! legacy_configuration_present ||
     die "Legacy display or suspend overrides are present. Run '$0 cleanup-legacy-all --dry-run', then '$0 cleanup-legacy-all', reboot, and retry."
 
+  apply_immediate_cooling
   log "Installing the default AMD-safe hardware profile (iGPU and suspend excluded)"
   install_packages
   if (( skip_wifi )); then
@@ -978,6 +1040,7 @@ install_default(){
 install_base(){
   need_root; preflight
   (($# == 0)) || die "install-base takes no arguments; use 'install' for the complete default profile."
+  apply_immediate_cooling
   install_packages
   ok "Base dependencies and matching running-kernel headers are ready"
   echo "NEXT: install and verify one hardware component at a time; see README.zh-CN.md."

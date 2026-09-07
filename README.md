@@ -16,6 +16,7 @@ Before running the installation, note these key preparation steps:
   networksetup -getmacaddress en0
   ```
   Record this address. It is required to calibrate the Broadcom BCM43602 Wi-Fi NVRAM file. Do not use placeholder or virtual MACs.
+- **Keep system and kernel in sync**: On a fresh install, run a full upgrade (`sudo pacman -Syu`) and reboot if a new kernel was installed so that the running kernel matches repository packages (avoid partial upgrades like `pacman -Sy`). The script automatically engages immediate CPU thermal throttling protection to prevent overheating and installs matching kernel headers (supporting `linux`, `linux-omarchy`, `linux-zen`, etc.).
 - **Supported GPU models**: Apple Radeon Pro 450, 455, and 460 (`1002:67ef`, subsystems `106b:0167/0166/0160`).
 - **Clean legacy overrides (optional)**: If you previously tested an older script release, remove legacy display and forced sleep overrides:
   ```bash
