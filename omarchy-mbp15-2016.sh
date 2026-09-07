@@ -7,13 +7,14 @@ set -Eeuo pipefail
 #
 # Commands:
 #   sudo ./omarchy-mbp15-2016.sh status
+#   sudo ./omarchy-mbp15-2016.sh install --wifi-mac AA:BB:CC:DD:EE:FF
 #   sudo ./omarchy-mbp15-2016.sh install-base
 #   sudo ./omarchy-mbp15-2016.sh install-wifi AA:BB:CC:DD:EE:FF
 #   sudo ./omarchy-mbp15-2016.sh install-touchbar
 #   sudo ./omarchy-mbp15-2016.sh install-suspend
 #   sudo ./omarchy-mbp15-2016.sh install-cooling
 #   sudo ./omarchy-mbp15-2016.sh install-mbpfan
-#   sudo ./omarchy-mbp15-2016.sh install-audio --ack-kernel-risk
+#   sudo ./omarchy-mbp15-2016.sh install-audio
 #   sudo ./omarchy-mbp15-2016.sh cleanup-legacy-all --dry-run
 #   sudo ./omarchy-mbp15-2016.sh cleanup-legacy-all
 #   sudo ./omarchy-mbp15-2016.sh gpu-igpu --yes
@@ -110,7 +111,7 @@ preflight_t1(){
   [[ "$p" == "8600" ]] || die "T1/iBridge is not healthy (expected 05ac:8600, got ${p:-unknown})."
   ok "T1/iBridge 05ac:8600 detected"
 }
-preflight(){ preflight_model; preflight_t1; }
+preflight(){ preflight_model; preflight_t1; preflight_gpu_identity; }
 
 backup_once(){
   local src="$1" name="$2"
@@ -220,7 +221,8 @@ verify_applespi(){
 
 # ---------- Audio ----------
 install_audio(){
-  [[ "${1:-}" == "--ack-kernel-risk" ]] || die "Audio is required for complete internal sound but can crash incompatible kernels. Re-run as: sudo $0 install-audio --ack-kernel-risk"
+  (($# == 0)) || die "install-audio takes no arguments."
+  warn "Installing required out-of-tree audio DKMS; reviewed kernel and matching-header gates remain enforced."
   require_reviewed_kernel_family
   require_kernel_headers
   git_sync "$AUDIO_URL" "$AUDIO_REPO" "$AUDIO_REF"
@@ -231,12 +233,17 @@ install_audio(){
 verify_audio(){
   log "Audio"
   local cards; cards="$(cat /proc/asound/cards 2>/dev/null || true)"; printf '%s\n' "$cards"
-  if printf '%s\n' "$cards" | grep -Eq 'HDA Intel PCH|HDA ATI HDMI|\[PCH|\[HDMI'; then
-    ok "ALSA card(s) present"
+  if printf '%s\n' "$cards" | grep -Eq 'HDA Intel PCH|\[PCH'; then
+    ok "Internal PCH ALSA card present"
   else
-    fail "No ALSA sound card found"; return 1
+    fail "Internal PCH ALSA card missing (an AMD HDMI-only card is insufficient)"; return 1
   fi
-  if dkms status 2>/dev/null | grep -qi 'snd_hda_macbookpro'; then ok "snd_hda_macbookpro DKMS installed"; else warn "Audio DKMS row not found"; fi
+  if dkms status 2>/dev/null | grep -qi 'snd_hda_macbookpro'; then
+    ok "snd_hda_macbookpro DKMS installed"
+  else
+    fail "Required snd_hda_macbookpro DKMS row not found"
+    return 1
+  fi
 }
 
 # ---------- Touch Bar ----------
@@ -538,14 +545,18 @@ EOF
   systemctl enable --now mbpfan.service
   systemctl is-active --quiet mbpfan.service || die "mbpfan.service failed to start."
   touch "$MBPFAN_INSTALLED"
-  ok "Optional pinned mbpfan service installed; no display configuration was changed"
+  ok "Pinned mbpfan service installed; no display configuration was changed"
 }
 
 verify_cooling(){
+  local require_mbpfan="${1:-}"
   log "Cooling / Fan policy"
   local rc=0
   if systemctl is-enabled --quiet mbpfan.service 2>/dev/null; then
-    if systemctl is-active --quiet mbpfan.service; then ok "optional mbpfan.service is active"; else fail "mbpfan.service is enabled but inactive"; rc=1; fi
+    if systemctl is-active --quiet mbpfan.service; then ok "mbpfan.service is active"; else fail "mbpfan.service is enabled but inactive"; rc=1; fi
+  elif [[ "$require_mbpfan" == "--require-mbpfan" ]]; then
+    fail "mbpfan.service is required by the default installation but is not enabled"
+    rc=1
   else
     ok "Apple SMC firmware fan control retained (mbpfan not enabled)"
   fi
@@ -899,27 +910,74 @@ status(){
 verify(){
   need_root; preflight; local rc=0
   verify_gpu || true
-  verify_cooling || rc=1
+  verify_cooling --require-mbpfan || rc=1
   verify_wifi || rc=1
   verify_applespi || rc=1
   verify_webcam || rc=1
   verify_fans_thermal || rc=1
   verify_audio || rc=1
   verify_touchbar || rc=1
-  verify_suspend || rc=1
   echo
   if (( rc == 0 )); then
-    ok "All automated hardware fix gates passed"
-    warn "Manual gates: physical audio playback and repeated real suspend/resume stability."
+    ok "All default-install automated hardware gates passed"
+    warn "Manual gate: confirm physical speaker, headphone, and microphone operation."
   else
-    fail "One or more hardware fix gates failed"
+    fail "One or more default-install hardware gates failed"
   fi
   return "$rc"
 }
 
+install_default(){
+  need_root
+  local mac="" skip_wifi=0
+  while (($#)); do
+    case "$1" in
+      --wifi-mac)
+        shift
+        (($#)) || die "--wifi-mac requires the real macOS Wi-Fi MAC address."
+        [[ -z "$mac" ]] || die "--wifi-mac may only be specified once."
+        mac="$1"
+        ;;
+      --skip-wifi-nvram) skip_wifi=1 ;;
+      *) die "Unknown install argument: $1" ;;
+    esac
+    shift
+  done
+
+  if (( skip_wifi )); then
+    [[ -z "$mac" ]] || die "Use either --wifi-mac or --skip-wifi-nvram, not both."
+  else
+    [[ -n "$mac" ]] || die "Default installation requires --wifi-mac <real macOS MAC>; use --skip-wifi-nvram only when calibrated NVRAM is already installed."
+    valid_mac "$mac" || die "Invalid Wi-Fi MAC: $mac"
+    [[ ! "$mac" =~ ^00:90:4[cC]: ]] || die "Refusing Broadcom placeholder MAC. Use the REAL macOS Wi-Fi MAC."
+  fi
+
+  preflight
+  ! legacy_configuration_present ||
+    die "Legacy display or suspend overrides are present. Run '$0 cleanup-legacy-all --dry-run', then '$0 cleanup-legacy-all', reboot, and retry."
+
+  log "Installing the default AMD-safe hardware profile (iGPU and suspend excluded)"
+  install_packages
+  if (( skip_wifi )); then
+    warn "Wi-Fi NVRAM installation explicitly skipped"
+  else
+    install_wifi "$mac"
+  fi
+  install_cooling
+  install_mbpfan
+  install_touchbar
+  install_audio
+
+  echo
+  ok "Default installation staged without changing GPU preference or suspend configuration"
+  echo "NEXT:"
+  echo "  sudo reboot"
+  echo "  sudo $0 verify"
+}
+
 install_base(){
   need_root; preflight
-  (($# == 0)) || die "install-base takes no arguments; risky components are installed as separate stages."
+  (($# == 0)) || die "install-base takes no arguments; use 'install' for the complete default profile."
   install_packages
   ok "Base dependencies and matching running-kernel headers are ready"
   echo "NEXT: install and verify one hardware component at a time; see README.zh-CN.md."
@@ -1132,13 +1190,15 @@ MacBookPro13,3 (2016 15-inch Touch Bar/T1) hardware fix & cooling script
 
 Usage:
   sudo $0 status
+  sudo $0 install --wifi-mac AA:BB:CC:DD:EE:FF
+  sudo $0 install --skip-wifi-nvram
   sudo $0 install-base
   sudo $0 install-wifi AA:BB:CC:DD:EE:FF
   sudo $0 install-touchbar
   sudo $0 install-suspend
   sudo $0 install-cooling
   sudo $0 install-mbpfan
-  sudo $0 install-audio --ack-kernel-risk
+  sudo $0 install-audio
   sudo $0 cleanup-legacy-all [--dry-run]
   sudo $0 gpu-igpu --yes
   sudo $0 gpu-confirm-igpu --yes
@@ -1151,23 +1211,26 @@ Usage:
   sudo $0 rollback
 
 Commands:
-  install-base     Install dependencies only; there is deliberately no full one-shot install
+  install          Install and configure the complete default profile; excludes iGPU and suspend
+  verify           Verify the complete default profile after one reboot; excludes suspend
+  install-base     Install dependencies only (diagnostic/repair use)
   install-cooling  Deploy a conservative CPU policy without changing displays
-  install-mbpfan   Optionally build the pinned active fan daemon
+  install-mbpfan   Reinstall the pinned active fan daemon used by the default profile
   cleanup-legacy-all Remove exact display and forced sleep/IOMMU settings left by older releases
   gpu-igpu         Start a one-boot iGPU trial with automatic next-boot AMD fallback
   gpu-confirm-igpu Confirm a working Intel session and cancel automatic AMD fallback
   gpu-dgpu         Set next-boot AMD EFI preference; neither GPU command edits Hyprland
   install-suspend  Deploy only pcie_ports=compat and the NVMe D3cold service
   install-touchbar Build the pinned Touch Bar DKMS driver without a blocking resume hook
-  install-audio    Required final-stage audio DKMS; explicit risk acknowledgement is mandatory
+  install-audio    Reinstall the required final-stage audio DKMS with kernel safety gates
 USAGE
 }
 
 if [[ "${MBP15_LIB_ONLY:-0}" != "1" ]]; then
   case "${1:-}" in
     status) status ;;
-    install|apply|install-base) shift; install_base "$@" ;;
+    install|apply) shift; install_default "$@" ;;
+    install-base) shift; install_base "$@" ;;
     install-wifi) shift; (($# == 1)) || die "Usage: sudo $0 install-wifi AA:BB:CC:DD:EE:FF"; need_root; preflight; install_wifi "$1" ;;
     install-suspend|install-nvme) need_root; preflight; install_suspend ;;
     install-cooling|install-thermal) need_root; preflight_model; install_cooling ;;
@@ -1177,7 +1240,7 @@ if [[ "${MBP15_LIB_ONLY:-0}" != "1" ]]; then
     gpu-confirm-igpu|confirm-igpu) shift; [[ $# -eq 1 ]] || die "Usage: sudo $0 gpu-confirm-igpu --yes"; need_root; preflight_model; confirm_igpu "$1" ;;
     gpu-dgpu|switch-dgpu) shift; [[ $# -eq 1 ]] || die "Usage: sudo $0 gpu-dgpu --yes"; need_root; preflight_model; switch_gpu amd "$1" ;;
     install-touchbar) need_root; preflight; install_touchbar ;;
-    install-audio) shift; [[ $# -eq 1 ]] || die "Usage: sudo $0 install-audio --ack-kernel-risk"; need_root; preflight; install_audio "$1" ;;
+    install-audio) shift; [[ $# -eq 0 ]] || die "Usage: sudo $0 install-audio"; need_root; preflight; install_audio ;;
     verify) verify ;;
     verify-touchbar) need_root; preflight; verify_touchbar ;;
     verify-suspend) need_root; preflight; verify_suspend ;;

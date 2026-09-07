@@ -12,7 +12,7 @@
 
 本版脚本因此做了这些限制：
 
-- 不再提供一次完成驱动、挂起、音频和显卡切换的全量安装。
+- 默认 `install` 一次完成全部必要硬件组件，但明确不包含 iGPU 切换和挂起配置。
 - GPU 命令只接受 Apple Radeon Pro 450/455/460（`1002:67ef`，子系统 `106b:0167/0166/0160`），其他硬件直接拒绝。
 - `gpu-igpu` 只有在 `00:02.0` 已可见、已绑定 `i915`、没有外接屏、没有旧版显示或强制休眠/IOMMU 配置时才允许执行。
 - GPU 命令只设置下一次启动的 EFI 偏好；不会热切换显卡，不会写 `AQ_DRM_DEVICES`，不会猜测 `card0/card1` 或 `eDP-1/eDP-2`。
@@ -46,7 +46,7 @@ git rev-parse HEAD
 3. 保存工作，拔掉所有 USB-C 显示器、扩展坞和非必要外设。
 4. 在 macOS 记录真实 Wi-Fi MAC：`networksetup -getmacaddress en0`。
 
-### 1. 核对目标硬件并首先清理旧配置
+### 1. 核对受支持显卡并首先清理旧配置
 
 ```bash
 chmod +x omarchy-mbp15-2016.sh
@@ -55,7 +55,13 @@ lspci -nnv -s 01:00.0
 sudo ./omarchy-mbp15-2016.sh cleanup-legacy-all --dry-run
 ```
 
-目标 Radeon Pro 460 的 PCI 输出必须同时包含设备 `1002:67ef` 和 Apple 子系统 `106b:0160`。物理身份不符合时不要继续。如果 dry-run 确实报告旧版脚本遗留配置，必须在安装其他组件之前执行清理：
+PCI 输出必须符合以下任一受支持的 Apple 显卡身份：
+
+- Radeon Pro 460：`1002:67ef`，子系统 `106b:0160`
+- Radeon Pro 455：`1002:67ef`，子系统 `106b:0166`
+- Radeon Pro 450：`1002:67ef`，子系统 `106b:0167`
+
+脚本会自动识别并显示实际型号，并非只对应 Pro 460。物理身份不在此列表时不要继续。如果 dry-run 确实报告旧版脚本遗留配置，必须在安装其他组件之前执行清理：
 
 ```bash
 sudo ./omarchy-mbp15-2016.sh cleanup-legacy-all
@@ -65,52 +71,29 @@ sudo ./omarchy-mbp15-2016.sh status
 
 全新系统没有遗留项时，不需要执行实际清理命令。
 
-### 2. 安装基础依赖并建立 AMD 基线
+### 2. 一条命令完成默认安装
 
 ```bash
-sudo ./omarchy-mbp15-2016.sh install-base
+sudo ./omarchy-mbp15-2016.sh install --wifi-mac AA:BB:CC:DD:EE:FF
 sudo reboot
-sudo ./omarchy-mbp15-2016.sh status
+sudo ./omarchy-mbp15-2016.sh verify
 ```
 
-`install-base` 会检查 DMI 型号、T1 状态和当前运行内核的精确 headers。它只安装依赖，不安装硬件驱动，不修改 GPU 偏好，也不安装挂起配置。先确认 AMD 模式能够连续完成数次重启和冷启动，再继续。
+这一条安装命令会自动完成默认配置：
 
-### 3. 逐项安装必要硬件功能
+- 基础依赖与当前运行内核的精确 headers
+- 使用 macOS 真实 MAC 安装 BCM43602 Wi-Fi NVRAM
+- CPU 降温策略与固定版本 `mbpfan`
+- 固定版本 T1/Touch Bar DKMS 与服务
+- 必需的固定版本音频 DKMS，并安排在最后安装
 
-先安装并验证风险较低的功能：
+它不会修改 GPU 偏好，也不会安装挂起配置。必需音频驱动仍受已审查内核范围和精确 headers 两道硬门禁保护，不再要求额外确认参数。如果已经安装并验证过正确的 Wi-Fi NVRAM，可改用：
 
 ```bash
-sudo ./omarchy-mbp15-2016.sh install-cooling
-sudo ./omarchy-mbp15-2016.sh verify-cooling
-
-sudo ./omarchy-mbp15-2016.sh install-wifi AA:BB:CC:DD:EE:FF
-sudo reboot
-sudo ./omarchy-mbp15-2016.sh verify-wifi
-
-sudo ./omarchy-mbp15-2016.sh install-touchbar
-sudo reboot
-sudo ./omarchy-mbp15-2016.sh verify-touchbar
+sudo ./omarchy-mbp15-2016.sh install --skip-wifi-nvram
 ```
 
-Wi-Fi 文件固定来源并校验 SHA-256。`install-cooling` 只设置 CPU 省电/禁用 Turbo 策略，不修改显示配置。Touch Bar 驱动源码固定到脚本内记录的提交，模块延迟加载以避开早期启动竞争；脚本不会在阻塞式 `system-sleep` 钩子中自动卸载 HID 内核模块，以免恢复链卡死。
-
-Apple SMC 本身会管理风扇；只有确实需要主动风扇曲线时才单独安装：
-
-```bash
-sudo ./omarchy-mbp15-2016.sh install-mbpfan
-```
-
-### 4. 最后安装必需的音频驱动
-
-内置音频是这台机器完成安装后的必要功能。由于它使用的树外驱动存在随内核变化而崩溃的上游报告，必须等其他必要阶段稳定后单独安装。脚本会固定源码提交、检查匹配 headers 并要求明确确认风险，但不能保证任意未来内核兼容：
-
-```bash
-sudo ./omarchy-mbp15-2016.sh install-audio --ack-kernel-risk
-sudo reboot
-sudo ./omarchy-mbp15-2016.sh verify-audio
-```
-
-测试扬声器、耳机、麦克风、再次重启以及正常负载。至此得到包含音频的 AMD 稳定基线，也是推荐的默认完成点。只有确实需要实验功能时，才继续下面的 iGPU 和挂起流程。
+一次重启后，`verify` 会统一验证整个默认配置，并且不会把 suspend 当成必需项。随后测试扬声器、耳机、麦克风、再次重启以及正常负载；这就是推荐的默认完成点。各个 `install-*` 和 `verify-*` 命令继续保留给故障诊断和单组件重装，正常首次安装不需要逐项手动执行。
 
 ## 可选实验：iGPU
 
@@ -186,8 +169,9 @@ sudo reboot
 
 | 命令 | 作用 |
 | --- | --- |
-| `status` / `verify` / `verify-*` | 只读诊断 / 完整门禁 / 单阶段门禁 |
-| `install-base` | 安装依赖并检查匹配内核 headers |
+| `status` / `verify` / `verify-*` | 只读诊断 / 默认配置统一门禁（不要求 suspend）/ 单阶段门禁 |
+| `install --wifi-mac <MAC>` | 一次安装完整默认配置；不包含 iGPU 和 suspend |
+| `install-base` | 仅安装依赖并检查匹配内核 headers，供维修使用 |
 | `install-touchbar` | 安装固定版本 T1/Touch Bar DKMS 与服务 |
 | `install-suspend` | 安装最小 PCIe/NVMe 配置 |
 | `cleanup-legacy-all [--dry-run]` | 预览/清理旧版显示及强制休眠/IOMMU 覆盖 |
@@ -196,9 +180,9 @@ sudo reboot
 | `gpu-dgpu --yes` | 设置下一启动为 AMD 偏好 |
 | `install-wifi <MAC>` | 安装经过 SHA-256 校验的 BCM43602 NVRAM |
 | `install-cooling` | CPU 省电/降温，不改显示 |
-| `install-mbpfan` | 可选主动风扇服务 |
+| `install-mbpfan` | 单独重装默认配置包含的主动风扇服务 |
 | `pm-test --yes` | 有条件的设备级挂起测试 |
-| `install-audio --ack-kernel-risk` | AMD 必需基线中最后单独安装的音频 DKMS |
+| `install-audio` | 单独重装默认配置中最后安装的必需音频 DKMS |
 | `previous-boot` | 查看上一启动周期挂起/恢复日志 |
 | `rollback` | 恢复备份、EFI 偏好并移除脚本服务/DKMS |
 

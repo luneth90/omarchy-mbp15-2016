@@ -10,7 +10,7 @@ Code review and automated tests are not target-hardware certification. The pinne
 
 On this model, non-macOS firmware boots normally expose only the AMD GPU. Writing `gpu-power-prefs` without a boot chain that executes `apple_set_os` can leave Intel unavailable and the internal panel black. USB-C display outputs normally depend on the AMD GPU, so an external monitor is not a reliable iGPU recovery path.
 
-This version deliberately has no one-shot full install. GPU commands admit only Apple Radeon Pro 450/455/460 (`1002:67ef`, subsystems `106b:0167/0166/0160`). `gpu-igpu` refuses to proceed unless Intel `00:02.0` is visible, bound to `i915`, all external displays are disconnected, and legacy display/sleep/IOMMU overrides are gone. GPU commands never hot-switch graphics or write `AQ_DRM_DEVICES`, DRM card numbers, or eDP connector names. The first iGPU boot automatically selects AMD for the following reboot unless the working Intel session is explicitly confirmed.
+The default `install` command configures all required hardware components while deliberately excluding iGPU switching and suspend. Apple Radeon Pro 450/455/460 are supported (`1002:67ef`, subsystems `106b:0167/0166/0160`). `gpu-igpu` refuses to proceed unless Intel `00:02.0` is visible, bound to `i915`, all external displays are disconnected, and legacy display/sleep/IOMMU overrides are gone. GPU commands never hot-switch graphics or write `AQ_DRM_DEVICES`, DRM card numbers, or eDP connector names. The first iGPU boot automatically selects AMD for the following reboot unless the working Intel session is explicitly confirmed.
 
 Keep macOS, Apple EFI, and Recovery intact. See the upstream model notes in [Dunedan/mbp-2016-linux](https://github.com/Dunedan/mbp-2016-linux).
 
@@ -31,7 +31,7 @@ git rev-parse HEAD
 
 Keep macOS, Apple EFI, and Recovery bootable. Confirm that a known-good AMD or older-kernel entry is available, save all work, disconnect docks/displays and nonessential peripherals, and record the real Wi-Fi MAC in macOS with `networksetup -getmacaddress en0`.
 
-### 1. Verify the target and remove legacy overrides first
+### 1. Verify a supported GPU and remove legacy overrides first
 
 ```bash
 chmod +x omarchy-mbp15-2016.sh
@@ -40,7 +40,13 @@ lspci -nnv -s 01:00.0
 sudo ./omarchy-mbp15-2016.sh cleanup-legacy-all --dry-run
 ```
 
-For a Radeon Pro 460, the PCI output must contain device `1002:67ef` and Apple subsystem `106b:0160`. Do not continue when the physical identity is not the expected machine. If and only if the dry run reports legacy settings from an older script, remove them before installing anything else:
+The PCI output must match one supported Apple GPU identity:
+
+- Radeon Pro 460: `1002:67ef`, subsystem `106b:0160`
+- Radeon Pro 455: `1002:67ef`, subsystem `106b:0166`
+- Radeon Pro 450: `1002:67ef`, subsystem `106b:0167`
+
+The script detects and reports the installed variant; it is not restricted to the Pro 460. Do not continue when the physical identity is outside this list. If and only if the dry run reports legacy settings from an older script, remove them before installing anything else:
 
 ```bash
 sudo ./omarchy-mbp15-2016.sh cleanup-legacy-all
@@ -48,50 +54,29 @@ sudo reboot
 sudo ./omarchy-mbp15-2016.sh status
 ```
 
-### 2. Install the base and establish an AMD baseline
+### 2. Run the complete default installation
 
 ```bash
-sudo ./omarchy-mbp15-2016.sh install-base
+sudo ./omarchy-mbp15-2016.sh install --wifi-mac AA:BB:CC:DD:EE:FF
 sudo reboot
-sudo ./omarchy-mbp15-2016.sh status
+sudo ./omarchy-mbp15-2016.sh verify
 ```
 
-`install-base` installs dependencies and checks the exact running-kernel headers. It does not install a hardware driver, change GPU preference, or install suspend configuration. Verify several successful AMD cold boots/reboots before continuing.
+This one install command performs the complete default profile:
 
-### 3. Install required hardware stages one at a time
+- dependencies and exact running-kernel headers
+- BCM43602 Wi-Fi NVRAM using the supplied real macOS MAC
+- conservative CPU cooling policy and pinned `mbpfan`
+- pinned T1/Touch Bar DKMS and service
+- required pinned audio DKMS, installed last
 
-Install and verify lower-risk stages first:
+It never changes GPU preference and never installs suspend configuration. The required audio driver remains protected by reviewed-kernel and exact-header gates without requiring an extra acknowledgement flag. If correctly calibrated Wi-Fi NVRAM is already installed, use this alternative instead:
 
 ```bash
-sudo ./omarchy-mbp15-2016.sh install-cooling
-sudo ./omarchy-mbp15-2016.sh verify-cooling
-
-sudo ./omarchy-mbp15-2016.sh install-wifi AA:BB:CC:DD:EE:FF
-sudo reboot
-sudo ./omarchy-mbp15-2016.sh verify-wifi
-
-sudo ./omarchy-mbp15-2016.sh install-touchbar
-sudo reboot
-sudo ./omarchy-mbp15-2016.sh verify-touchbar
+sudo ./omarchy-mbp15-2016.sh install --skip-wifi-nvram
 ```
 
-Apple SMC already manages the fans. Active fan control remains an optional, separate stage:
-
-```bash
-sudo ./omarchy-mbp15-2016.sh install-mbpfan
-```
-
-### 4. Install required audio last in the AMD baseline
-
-Internal audio is required for a complete installation on this machine. Its out-of-tree driver has kernel-specific crash reports, so it is installed alone after every other required stage is stable. The source is pinned and explicit acknowledgement is required, but future-kernel compatibility cannot be guaranteed:
-
-```bash
-sudo ./omarchy-mbp15-2016.sh install-audio --ack-kernel-risk
-sudo reboot
-sudo ./omarchy-mbp15-2016.sh verify-audio
-```
-
-Test speakers, headphones, microphone, another reboot, and normal workload. This working AMD configuration, including audio, is the recommended completion point. Do not proceed to iGPU or suspend unless those experimental features are specifically required.
+After the single reboot, `verify` checks the whole default profile at once and deliberately does not require suspend. Test speakers, headphones, microphone, another reboot, and normal workload. This working configuration is the recommended completion point. The per-component `install-*` and `verify-*` commands remain available for repair and diagnosis, but are not required during a normal first installation.
 
 ## Optional experiment: iGPU
 
@@ -157,7 +142,7 @@ sudo reboot
 - Exact Pro 450/455/460 identity gate and an automatic next-boot AMD fallback for unconfirmed iGPU trials.
 - `cleanup-legacy-all --dry-run` previews migration cleanup, including the old forced `freeze/s2idle` drop-in; rescue-root cleanup can scan all `/home/*` users.
 - Rollback restores EFI/configuration/firmware/binary backups, removes installed DKMS modules, and reports bootloader update failures.
-- `install-cooling` no longer changes boot or display configuration; `mbpfan` is a separate opt-in stage.
+- The default installer includes pinned `mbpfan`; its component command remains available for isolated repair, and cooling never changes display configuration.
 
 Upstreams: [T1/Touch Bar](https://github.com/nohzafk/omarchy-macbookpro-t1), [audio](https://github.com/davidjo/snd_hda_macbookpro), [mbpfan](https://github.com/linux-on-mac/mbpfan), [EFI GPU switch reference](https://github.com/0xbb/gpu-switch).
 

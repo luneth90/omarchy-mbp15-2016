@@ -14,9 +14,31 @@ fi
 
 install_base_body="$(sed -n '/^install_base(){/,/^}/p' "$script")"
 if grep -Eq 'switch_gpu|confirm_igpu|install_suspend|pm_test|systemctl suspend' <<<"$install_base_body"; then
+  echo "Base install path invokes an experimental GPU or suspend action" >&2
+  exit 1
+fi
+
+install_default_body="$(sed -n '/^install_default(){/,/^}/p' "$script")"
+if grep -Eq 'switch_gpu|confirm_igpu|install_suspend|pm_test|systemctl suspend' <<<"$install_default_body"; then
   echo "Default install path invokes an experimental GPU or suspend action" >&2
   exit 1
 fi
+for required_stage in install_packages install_wifi install_cooling install_mbpfan install_touchbar install_audio; do
+  grep -Fq "$required_stage" <<<"$install_default_body" || {
+    echo "Default install path is missing $required_stage" >&2
+    exit 1
+  }
+done
+
+verify_body="$(sed -n '/^verify(){/,/^}/p' "$script")"
+if grep -Fq 'verify_suspend' <<<"$verify_body"; then
+  echo "Default verification still requires the optional suspend experiment" >&2
+  exit 1
+fi
+
+verify_audio_body="$(sed -n '/^verify_audio(){/,/^}/p' "$script")"
+grep -Fq 'Internal PCH ALSA card missing' <<<"$verify_audio_body"
+grep -Fq 'Required snd_hda_macbookpro DKMS row not found' <<<"$verify_audio_body"
 
 if grep -Eq 'append_cmdline "(video=|mem_sleep_default=|iommu=|intel_iommu=)' "$script"; then
   echo "Unsafe display/suspend boot parameter is still installed" >&2
@@ -84,14 +106,40 @@ mkdir -p "$pro460"
 printf '%s\n' 0x1002 > "$pro460/vendor"
 printf '%s\n' 0x67ef > "$pro460/device"
 printf '%s\n' 0x106b > "$pro460/subsystem_vendor"
-printf '%s\n' 0x0160 > "$pro460/subsystem_device"
-preflight_gpu_identity >/dev/null
+for supported_subsystem in 0x0160 0x0166 0x0167; do
+  printf '%s\n' "$supported_subsystem" > "$pro460/subsystem_device"
+  preflight_gpu_identity >/dev/null
+done
 printf '%s\n' 0xffff > "$pro460/subsystem_device"
 if (preflight_gpu_identity >/dev/null 2>&1); then
   echo "GPU identity gate accepted an unsupported subsystem" >&2
   exit 1
 fi
 printf '%s\n' 0x0160 > "$pro460/subsystem_device"
+
+default_calls="$(
+  default_calls=""
+  need_root(){ :; }
+  preflight(){ default_calls+=" preflight"; }
+  legacy_configuration_present(){ return 1; }
+  install_packages(){ default_calls+=" packages"; }
+  install_wifi(){ default_calls+=" wifi:$1"; }
+  install_cooling(){ default_calls+=" cooling"; }
+  install_mbpfan(){ default_calls+=" mbpfan"; }
+  install_touchbar(){ default_calls+=" touchbar"; }
+  install_audio(){ (($# == 0)); default_calls+=" audio"; }
+  install_default --wifi-mac AA:BB:CC:DD:EE:FF >/dev/null
+  printf '%s' "$default_calls"
+)"
+[[ "$default_calls" == " preflight packages wifi:AA:BB:CC:DD:EE:FF cooling mbpfan touchbar audio" ]]
+if (need_root(){ :; }; install_default >/dev/null 2>&1); then
+  echo "Default install accepted a missing Wi-Fi decision" >&2
+  exit 1
+fi
+if (need_root(){ :; }; install_default --wifi-mac AA:BB:CC:DD:EE:FF --skip-wifi-nvram >/dev/null 2>&1); then
+  echo "Default install accepted conflicting Wi-Fi options" >&2
+  exit 1
+fi
 
 STATE="$tmp/gpu-state"
 EFI_VARS="$tmp/switch-efivars"
