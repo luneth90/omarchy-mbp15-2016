@@ -63,41 +63,47 @@ sudo ./omarchy-mbp15-2016.sh verify
 
 ## 3. Standalone Setup: iGPU Switching
 
-On `MacBookPro13,3`, non-macOS boot loaders expose only the AMD dGPU by default. Switching to the Intel integrated GPU (for reduced power consumption and lower heat) requires the bootloader to coordinate exposing the iGPU.
+By default, the system runs on the AMD discrete GPU (higher heat and power consumption, but required for external displays). Switching to the Intel integrated GPU significantly reduces running temperature and extends battery life.
 
-> **Note**: USB-C video outputs are wired directly to the AMD dGPU. In iGPU mode, external displays are generally unavailable. Always disconnect external monitors before switching.
+> **Note**: USB-C display outputs on this machine are wired directly to the AMD dGPU. **In iGPU mode, external displays will not work**. Always disconnect external monitors and docks before switching.
 
-### Step 1: Configure `apple_set_os` in your bootloader
-Configure your bootloader to execute `apple_set_os.efi` before booting Linux (for example, in rEFInd's `refind.conf` via `spoof_osx_version 10.12`). Reboot while keeping the AMD dGPU active.
-
-### Step 2: Confirm Intel iGPU is exposed and handled by kernel
-After booting, check that the Intel graphics device is visible and bound to `i915`:
+### Step 1: Check if the iGPU is ready
+Run this hardware check in your terminal:
 ```bash
 lspci -nnk -s 00:02.0
 ```
-The output must show Intel graphics with `Kernel driver in use: i915`. Do not proceed if this is not met.
+If the output shows Intel graphics with `Kernel driver in use: i915`, the iGPU is already exposed and handled by the kernel. **You can proceed directly to Step 2**.
 
-### Step 3: Switch to iGPU and reboot
-Disconnect all external displays and run:
+> **Troubleshooting tip**: If this command produces no output, the firmware has hidden the iGPU. Only in that case must your bootloader execute `apple_set_os.efi` before booting Linux to unlock the iGPU.
+
+### Step 2: Switch to iGPU and reboot
+Ensure all external monitors are disconnected, then run:
 ```bash
 sudo ./omarchy-mbp15-2016.sh gpu-igpu --yes
 sudo reboot
 ```
 > **Automatic Fallback Protection**: To prevent getting locked out by a black screen, the script arms an automatic fallback on the first iGPU boot: if the session is not explicitly confirmed, the next reboot automatically reverts to AMD.
 
-### Step 4: Verify and confirm the iGPU session
-Once you reach the desktop and confirm the display, keyboard, and trackpad are working properly:
+### Step 3: Verify and permanently confirm the iGPU session
+After rebooting into your desktop and verifying that internal display, keyboard, and trackpad work properly, run:
 ```bash
 sudo ./omarchy-mbp15-2016.sh verify-gpu
 sudo ./omarchy-mbp15-2016.sh gpu-confirm-igpu --yes
 ```
-This confirms the configuration and permanently sets Intel as the preferred GPU.
+Once confirmed, the Intel iGPU configuration remains active across reboots.
 
-> **Switching back to AMD dGPU at any time**:
-> ```bash
-> sudo ./omarchy-mbp15-2016.sh gpu-dgpu --yes
-> sudo reboot
-> ```
+---
+
+### (Optional) How and When to Revert to AMD dGPU
+
+> **Important Warning**: Execute the command below only when you **explicitly want to switch back to AMD discrete graphics** (e.g., when connecting external monitors, running graphics-intensive workloads, or troubleshooting iGPU issues). **Do NOT run this command right after confirming iGPU, or you will immediately revert back to the dGPU!**
+
+To restore AMD discrete graphics:
+```bash
+sudo ./omarchy-mbp15-2016.sh gpu-dgpu --yes
+sudo reboot
+```
+After rebooting, the system will run on the AMD Radeon Pro discrete GPU.
 
 ---
 
