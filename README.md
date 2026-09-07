@@ -10,7 +10,7 @@ Code review and automated tests are not target-hardware certification. The pinne
 
 On this model, non-macOS firmware boots normally expose only the AMD GPU. Writing `gpu-power-prefs` without a boot chain that executes `apple_set_os` can leave Intel unavailable and the internal panel black. USB-C display outputs normally depend on the AMD GPU, so an external monitor is not a reliable iGPU recovery path.
 
-This version deliberately has no one-shot full install. `gpu-igpu` refuses to proceed unless Intel `00:02.0` is visible, bound to `i915`, all external displays are disconnected, and legacy hard-coded display settings are gone. GPU commands only change the next-boot EFI preference; they never hot-switch graphics or write `AQ_DRM_DEVICES`, DRM card numbers, or eDP connector names.
+This version deliberately has no one-shot full install. GPU commands admit only Apple Radeon Pro 450/455/460 (`1002:67ef`, subsystems `106b:0167/0166/0160`). `gpu-igpu` refuses to proceed unless Intel `00:02.0` is visible, bound to `i915`, all external displays are disconnected, and legacy display/sleep/IOMMU overrides are gone. GPU commands never hot-switch graphics or write `AQ_DRM_DEVICES`, DRM card numbers, or eDP connector names. The first iGPU boot automatically selects AMD for the following reboot unless the working Intel session is explicitly confirmed.
 
 Keep macOS, Apple EFI, and Recovery intact. See the upstream model notes in [Dunedan/mbp-2016-linux](https://github.com/Dunedan/mbp-2016-linux).
 
@@ -33,7 +33,8 @@ sudo ./omarchy-mbp15-2016.sh install-suspend
 sudo reboot
 sudo ./omarchy-mbp15-2016.sh verify-suspend
 
-sudo ./omarchy-mbp15-2016.sh cleanup-legacy-graphics
+sudo ./omarchy-mbp15-2016.sh cleanup-legacy-all --dry-run
+sudo ./omarchy-mbp15-2016.sh cleanup-legacy-all
 sudo reboot
 ```
 
@@ -50,9 +51,10 @@ sudo ./omarchy-mbp15-2016.sh gpu-igpu --yes
 sudo reboot
 sudo ./omarchy-mbp15-2016.sh verify-gpu
 hyprctl monitors all
+sudo ./omarchy-mbp15-2016.sh gpu-confirm-igpu --yes
 ```
 
-Do not assume the panel is named `eDP-1` or `eDP-2`. If the internal screen is black, use the Apple boot picker/macOS or another known-good recovery entry, then restore AMD preference:
+On the first Intel boot, reaching `multi-user.target` automatically selects AMD for the following reboot. Confirm only after the desktop and input devices work. If the screen is black but Linux reaches userspace, wait one minute and reboot to use AMD. If the kernel locks before the fallback service runs, use the Apple boot picker/macOS or another known-good recovery entry. Do not assume the panel is named `eDP-1` or `eDP-2`. To restore AMD manually:
 
 ```bash
 sudo ./omarchy-mbp15-2016.sh gpu-dgpu --yes
@@ -91,6 +93,8 @@ sudo reboot
 - No blocking Touch Bar module-unload hook in the system sleep/resume path.
 - Minimal suspend setup: `pcie_ports=compat` plus NVMe D3cold override; no forced sleep mode or IOMMU.
 - EFI original-value backup and write verification.
+- Exact Pro 450/455/460 identity gate and an automatic next-boot AMD fallback for unconfirmed iGPU trials.
+- `cleanup-legacy-all --dry-run` previews migration cleanup, including the old forced `freeze/s2idle` drop-in; rescue-root cleanup can scan all `/home/*` users.
 - Rollback restores EFI/configuration/firmware/binary backups, removes installed DKMS modules, and reports bootloader update failures.
 - `install-cooling` no longer changes boot or display configuration; `mbpfan` is a separate opt-in stage.
 

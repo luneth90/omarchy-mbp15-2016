@@ -13,8 +13,10 @@
 本版脚本因此做了这些限制：
 
 - 不再提供一次完成驱动、挂起、音频和显卡切换的全量安装。
-- `gpu-igpu` 只有在 `00:02.0` 已可见、已绑定 `i915`、没有外接屏、没有旧版硬编码显示配置时才允许执行。
+- GPU 命令只接受 Apple Radeon Pro 450/455/460（`1002:67ef`，子系统 `106b:0167/0166/0160`），其他硬件直接拒绝。
+- `gpu-igpu` 只有在 `00:02.0` 已可见、已绑定 `i915`、没有外接屏、没有旧版显示或强制休眠/IOMMU 配置时才允许执行。
 - GPU 命令只设置下一次启动的 EFI 偏好；不会热切换显卡，不会写 `AQ_DRM_DEVICES`，不会猜测 `card0/card1` 或 `eDP-1/eDP-2`。
+- 第一次 iGPU 启动默认把再下一次启动预设回 AMD；只有桌面验证成功并执行 `gpu-confirm-igpu --yes` 后才永久保留 Intel 偏好。
 - 首次更改 EFI 前保存原值；`rollback` 会恢复原值。
 - GPU 更改和实际挂起测试都要求显式 `--yes`。
 
@@ -63,16 +65,17 @@ sudo ./omarchy-mbp15-2016.sh verify-suspend
 
 此阶段只加入 `pcie_ports=compat`，并启用针对实际 NVMe PCI 地址的 D3cold 服务；不再强制 `s2idle`、IOMMU 或覆盖其他 Omarchy 服务。此时不要直接做真实挂起。
 
-### 4. 清理旧版显示配置
+### 4. 清理旧版显示与强制休眠配置
 
 如果曾运行旧版脚本，务必执行：
 
 ```bash
-sudo ./omarchy-mbp15-2016.sh cleanup-legacy-graphics
+sudo ./omarchy-mbp15-2016.sh cleanup-legacy-all --dry-run
+sudo ./omarchy-mbp15-2016.sh cleanup-legacy-all
 sudo reboot
 ```
 
-它只移除旧脚本的精确 `AQ_DRM_DEVICES=/dev/dri/cardN:...`、`video=eDP-2:d` 和两条固定 Hyprland monitor 注入。含有其他内容的 UWSM 文件会保留并给出警告。
+它先备份再移除旧脚本的精确 `AQ_DRM_DEVICES=/dev/dri/cardN:...`、`video=eDP-2:d`、固定 Hyprland monitor 注入、`30-mbp15-suspend.conf` 中的强制 `freeze/s2idle`，以及旧版加入的 `mem_sleep_default=s2idle`、`iommu=pt`、`intel_iommu=on`。混合配置中的其他内容会保留；在救援环境以纯 root 执行时会扫描 `/home/*`。
 
 ### 5. 在引导器中配置 `apple_set_os`
 
@@ -95,9 +98,12 @@ sudo ./omarchy-mbp15-2016.sh gpu-igpu --yes
 sudo reboot
 sudo ./omarchy-mbp15-2016.sh verify-gpu
 hyprctl monitors all
+sudo ./omarchy-mbp15-2016.sh gpu-confirm-igpu --yes
 ```
 
-不要手工假定内屏叫 `eDP-1` 或 `eDP-2`。如果内屏黑屏，强制关机后用 Apple 启动选择器/macOS 或已知可用的恢复启动项进入系统，再运行：
+`gpu-igpu` 会安装一次性保护：首次 Intel 启动到达 `multi-user.target` 后，自动把下一次启动设回 AMD。只有确认桌面、键盘和触控板正常后才运行 `gpu-confirm-igpu --yes`。如果内屏黑屏但系统仍启动，等待一分钟后强制重启，应该回到 AMD；若内核在保护服务启动前就锁死，则使用 Apple 启动选择器/macOS 或已知可用的恢复环境。不要手工假定内屏叫 `eDP-1` 或 `eDP-2`。
+
+需要手动恢复 AMD 时运行：
 
 ```bash
 sudo ./omarchy-mbp15-2016.sh gpu-dgpu --yes
@@ -147,8 +153,9 @@ sudo reboot
 | `install-base` | 安装依赖并检查匹配内核 headers |
 | `install-touchbar` | 安装固定版本 T1/Touch Bar DKMS 与服务 |
 | `install-suspend` | 安装最小 PCIe/NVMe 配置 |
-| `cleanup-legacy-graphics` | 精确清理旧版危险显示覆盖 |
-| `gpu-igpu --yes` | 门禁通过后设置下一启动为 Intel 偏好 |
+| `cleanup-legacy-all [--dry-run]` | 预览/清理旧版显示及强制休眠/IOMMU 覆盖 |
+| `gpu-igpu --yes` | 门禁通过后开始带自动 AMD 回退的首次 Intel 启动 |
+| `gpu-confirm-igpu --yes` | 确认当前 Intel 会话正常并取消自动 AMD 回退 |
 | `gpu-dgpu --yes` | 设置下一启动为 AMD 偏好 |
 | `install-wifi <MAC>` | 安装经过 SHA-256 校验的 BCM43602 NVRAM |
 | `install-cooling` | CPU 省电/降温，不改显示 |

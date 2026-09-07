@@ -14,8 +14,10 @@ set -Eeuo pipefail
 #   sudo ./omarchy-mbp15-2016.sh install-cooling
 #   sudo ./omarchy-mbp15-2016.sh install-mbpfan
 #   sudo ./omarchy-mbp15-2016.sh install-audio --ack-kernel-risk
-#   sudo ./omarchy-mbp15-2016.sh cleanup-legacy-graphics
+#   sudo ./omarchy-mbp15-2016.sh cleanup-legacy-all --dry-run
+#   sudo ./omarchy-mbp15-2016.sh cleanup-legacy-all
 #   sudo ./omarchy-mbp15-2016.sh gpu-igpu --yes
+#   sudo ./omarchy-mbp15-2016.sh gpu-confirm-igpu --yes
 #   sudo ./omarchy-mbp15-2016.sh gpu-dgpu --yes
 #   sudo reboot
 #   sudo ./omarchy-mbp15-2016.sh verify
@@ -67,6 +69,12 @@ EFI_VARS="/sys/firmware/efi/efivars"
 EFI_GPU_VAR="gpu-power-prefs-fa4ce28d-b62f-4c99-9cc3-6815686e30f9"
 EFI_GPU_BAK="$STATE/${EFI_GPU_VAR}.before"
 EFI_GPU_ABSENT="$STATE/${EFI_GPU_VAR}.absent"
+GPU_FALLBACK_MARKER="$STATE/gpu-igpu-unconfirmed"
+GPU_FALLBACK_ARMED_BOOT="$STATE/gpu-igpu-armed-boot-id"
+GPU_FALLBACK_HELPER="/usr/local/sbin/mbp15-gpu-fallback-amd"
+GPU_FALLBACK_UNIT="/etc/systemd/system/mbp15-gpu-fallback-amd.service"
+SYSTEM_ENVIRONMENT="/etc/environment"
+PCI_DEVICES="/sys/bus/pci/devices"
 AUDIO_INSTALLED="$STATE/audio-dkms.installed"
 TB_INSTALLED="$STATE/touchbar-dkms.installed"
 MBPFAN_INSTALLED="$STATE/mbpfan.installed"
@@ -594,8 +602,8 @@ target_user_home(){
 
 legacy_graphics_present(){
   local home
-  grep -Eq '(^|[[:space:]])video=eDP-2:d([[:space:]]|$)' "$LIMINE" 2>/dev/null && return 0
-  grep -q '^AQ_DRM_DEVICES=' /etc/environment 2>/dev/null && return 0
+  grep -Fq 'video=eDP-2:d' "$LIMINE" 2>/dev/null && return 0
+  grep -q '^AQ_DRM_DEVICES=' "$SYSTEM_ENVIRONMENT" 2>/dev/null && return 0
   home="$(target_user_home || true)"
   if [[ -n "$home" ]]; then
     legacy_graphics_in_home "$home" && return 0
@@ -606,6 +614,19 @@ legacy_graphics_present(){
     done
   fi
   return 1
+}
+
+legacy_suspend_overrides_present(){
+  local arg
+  for arg in mem_sleep_default=s2idle iommu=pt intel_iommu=on; do
+    grep -Fq "$arg" "$LIMINE" 2>/dev/null && return 0
+  done
+  grep -Eq '^(SuspendState=freeze|MemorySleepMode=s2idle)$' "$SLEEP_CONF" 2>/dev/null && return 0
+  return 1
+}
+
+legacy_configuration_present(){
+  legacy_graphics_present || legacy_suspend_overrides_present
 }
 
 legacy_graphics_in_home(){
@@ -621,13 +642,39 @@ legacy_graphics_in_home(){
 
 preflight_igpu(){
   local driver ext
-  [[ -e /sys/bus/pci/devices/0000:00:02.0 ]] || die "Intel IGD 00:02.0 is hidden by firmware. Configure apple_set_os/rEFInd first, reboot, and confirm 'lspci -nnk -s 00:02.0' shows Intel graphics before changing EFI GPU preference."
-  driver="$(basename "$(readlink -f /sys/bus/pci/devices/0000:00:02.0/driver 2>/dev/null)" 2>/dev/null || true)"
+  [[ -e "$PCI_DEVICES/0000:00:02.0" ]] || die "Intel IGD 00:02.0 is hidden by firmware. Configure apple_set_os/rEFInd first, reboot, and confirm 'lspci -nnk -s 00:02.0' shows Intel graphics before changing EFI GPU preference."
+  driver="$(basename "$(readlink -f "$PCI_DEVICES/0000:00:02.0/driver" 2>/dev/null)" 2>/dev/null || true)"
   [[ "$driver" == "i915" ]] || die "Intel IGD is visible but not bound to i915 (driver: ${driver:-none}); refusing an iGPU switch."
   ext="$(external_output_connected || true)"
   [[ -z "$ext" ]] || die "External output $ext is connected. Disconnect all USB-C/DisplayPort/HDMI displays before selecting iGPU mode."
-  ! legacy_graphics_present || die "Legacy hard-coded eDP/AQ_DRM settings are present. Run '$0 cleanup-legacy-graphics', log out/reboot if it changed user graphics config, then retry."
   ok "Intel IGD is visible and bound to i915; no external display is connected"
+}
+
+preflight_gpu_identity(){
+  local base="$PCI_DEVICES/0000:01:00.0" vendor device subvendor subsystem label
+  [[ -d "$base" ]] || die "AMD dGPU 01:00.0 is not visible; refusing to change GPU preference."
+  vendor="$(cat "$base/vendor" 2>/dev/null || true)"
+  device="$(cat "$base/device" 2>/dev/null || true)"
+  subvendor="$(cat "$base/subsystem_vendor" 2>/dev/null || true)"
+  subsystem="$(cat "$base/subsystem_device" 2>/dev/null || true)"
+  [[ "$vendor" == "0x1002" && "$device" == "0x67ef" && "$subvendor" == "0x106b" ]] ||
+    die "Unsupported dGPU identity: ${vendor:-?}:${device:-?} subsystem ${subvendor:-?}:${subsystem:-?}; expected Apple Baffin 1002:67ef."
+  case "$subsystem" in
+    0x0160) label="Radeon Pro 460" ;;
+    0x0166) label="Radeon Pro 455" ;;
+    0x0167) label="Radeon Pro 450" ;;
+    *) die "Unsupported Apple Baffin subsystem $subsystem; only Radeon Pro 450/455/460 are admitted." ;;
+  esac
+  ok "$label detected ($vendor:$device / $subvendor:$subsystem)"
+}
+
+preflight_gpu_switch(){
+  local mode="$1"
+  preflight_gpu_identity
+  ! legacy_configuration_present ||
+    die "Legacy display or suspend overrides are present. Run '$0 cleanup-legacy-all --dry-run', then '$0 cleanup-legacy-all', reboot, and retry."
+  [[ "$mode" == "intel" || "$mode" == "igpu" ]] && preflight_igpu
+  return 0
 }
 
 backup_efi_gpu_once(){
@@ -673,18 +720,89 @@ write_efi_gpu_pref(){
       chattr -i "$f" 2>/dev/null || true
       if (( had_old )); then cp -f "$tmp" "$f"; else rm -f "$f"; fi
       rm -f "$tmp"
-      die "EFI Intel preference write failed verification; the value from before this command was restored."
+      fail "EFI Intel preference write failed verification; the value from before this command was restored."
+      return 1
     fi
   else
     if ! printf "\x07\x00\x00\x00\x00\x00\x00\x00" > "$f" || [[ "$(efi_gpu_pref)" != "amd" ]]; then
       chattr -i "$f" 2>/dev/null || true
       if (( had_old )); then cp -f "$tmp" "$f"; else rm -f "$f"; fi
       rm -f "$tmp"
-      die "EFI AMD preference write failed verification; the value from before this command was restored."
+      fail "EFI AMD preference write failed verification; the value from before this command was restored."
+      return 1
     fi
   fi
   rm -f "$tmp"
   sync
+}
+
+arm_gpu_fallback(){
+  install -d -m 0755 "$STATE" "$(dirname "$GPU_FALLBACK_HELPER")" "$(dirname "$GPU_FALLBACK_UNIT")"
+  backup_once "$GPU_FALLBACK_HELPER" "mbp15-gpu-fallback-amd.helper.before"
+  backup_once "$GPU_FALLBACK_UNIT" "mbp15-gpu-fallback-amd.service.before"
+  cat > "$GPU_FALLBACK_HELPER" <<EOF
+#!/usr/bin/env bash
+set -Eeuo pipefail
+marker="$GPU_FALLBACK_MARKER"
+efi="$EFI_VARS/$EFI_GPU_VAR"
+log="$STATE/gpu-fallback.log"
+[[ -e "\$marker" ]] || exit 0
+chattr -i "\$efi" 2>/dev/null || true
+printf '\\x07\\x00\\x00\\x00\\x00\\x00\\x00\\x00' > "\$efi"
+value="\$(od -An -j4 -N1 -t u1 "\$efi" 2>/dev/null | tr -d '[:space:]')"
+[[ "\$value" == "0" ]] || { printf '%s EFI AMD fallback verification failed\\n' "\$(date --iso-8601=seconds)" >> "\$log"; exit 1; }
+sync
+printf '%s next-boot AMD fallback armed after unconfirmed iGPU boot\\n' "\$(date --iso-8601=seconds)" >> "\$log"
+EOF
+  chmod 0755 "$GPU_FALLBACK_HELPER"
+  cat > "$GPU_FALLBACK_UNIT" <<EOF
+[Unit]
+Description=Restore AMD preference after an unconfirmed MacBook iGPU boot
+ConditionPathExists=$GPU_FALLBACK_MARKER
+After=local-fs.target
+Before=graphical.target
+
+[Service]
+Type=oneshot
+ExecStart=$GPU_FALLBACK_HELPER
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  cat /proc/sys/kernel/random/boot_id > "$GPU_FALLBACK_ARMED_BOOT"
+  touch "$GPU_FALLBACK_MARKER"
+  systemctl daemon-reload
+  systemctl enable "$(basename "$GPU_FALLBACK_UNIT")" || { disarm_gpu_fallback; return 1; }
+  ok "Automatic next-boot AMD fallback armed until iGPU is explicitly confirmed"
+}
+
+disarm_gpu_fallback(){
+  local unit="$(basename "$GPU_FALLBACK_UNIT")"
+  [[ -e "$GPU_FALLBACK_MARKER" || -e "$STATE/mbp15-gpu-fallback-amd.helper.before" ||
+     -e "$STATE/mbp15-gpu-fallback-amd.helper.before.absent" ||
+     -e "$STATE/mbp15-gpu-fallback-amd.service.before" ||
+     -e "$STATE/mbp15-gpu-fallback-amd.service.before.absent" ]] || return 0
+  systemctl disable --now "$unit" >/dev/null 2>&1 || true
+  rm -f "$GPU_FALLBACK_MARKER" "$GPU_FALLBACK_ARMED_BOOT"
+  restore_or_remove "$GPU_FALLBACK_HELPER" "mbp15-gpu-fallback-amd.helper.before"
+  restore_or_remove "$GPU_FALLBACK_UNIT" "mbp15-gpu-fallback-amd.service.before"
+  systemctl daemon-reload
+}
+
+confirm_igpu(){
+  local acknowledgement="${1:-}" armed_boot current_boot
+  [[ "$acknowledgement" == "--yes" ]] || die "Usage: sudo $0 gpu-confirm-igpu --yes"
+  preflight_gpu_switch intel
+  [[ "$(active_gpu)" == "intel" ]] || die "The internal panel is not currently driven by Intel; refusing to confirm iGPU mode."
+  [[ -e "$GPU_FALLBACK_MARKER" ]] || die "No unconfirmed iGPU trial is pending."
+  armed_boot="$(cat "$GPU_FALLBACK_ARMED_BOOT" 2>/dev/null || true)"
+  current_boot="$(cat /proc/sys/kernel/random/boot_id 2>/dev/null || true)"
+  [[ -n "$armed_boot" && -n "$current_boot" && "$armed_boot" != "$current_boot" ]] ||
+    die "The iGPU trial has not completed a reboot yet; confirmation is refused in the boot that armed it."
+  write_efi_gpu_pref intel || die "Could not preserve the confirmed Intel preference."
+  disarm_gpu_fallback
+  ok "Intel iGPU preference confirmed; automatic AMD fallback removed"
 }
 
 switch_gpu(){
@@ -692,17 +810,24 @@ switch_gpu(){
   [[ "$acknowledgement" == "--yes" ]] || die "GPU changes take effect at reboot and can make the internal display unusable. Re-run with --yes after reading the recovery steps in README.zh-CN.md."
   [[ "$mode" == "intel" || "$mode" == "igpu" || "$mode" == "amd" || "$mode" == "dgpu" ]] || die "Unknown GPU mode: $mode"
   [[ -d "$EFI_VARS" ]] || die "EFI variables directory ($EFI_VARS) not found."
-  [[ "$mode" == "amd" || "$mode" == "dgpu" ]] || preflight_igpu
+  preflight_gpu_switch "$mode"
   backup_efi_gpu_once
 
   if [[ "$mode" == "intel" || "$mode" == "igpu" ]]; then
     log "Setting the next-boot EFI preference to Intel HD 530"
-    write_efi_gpu_pref intel
+    arm_gpu_fallback || die "Could not arm the automatic AMD fallback; EFI preference was not changed."
+    if ! write_efi_gpu_pref intel; then
+      disarm_gpu_fallback
+      die "Could not start the iGPU trial. Automatic fallback artifacts were removed."
+    fi
     ok "Next-boot preference is Intel HD 530; no Hyprland, connector, or card-number override was written"
+    warn "On the first iGPU boot, run 'sudo $0 gpu-confirm-igpu --yes' only after the desktop and input devices are verified."
+    warn "Without confirmation, reaching multi-user.target automatically selects AMD for the following reboot."
     warn "The bootloader must run apple_set_os on every iGPU boot. External USB-C display outputs normally require the AMD dGPU."
   elif [[ "$mode" == "amd" || "$mode" == "dgpu" ]]; then
     log "Setting the next-boot EFI preference to AMD Radeon Pro"
-    write_efi_gpu_pref amd
+    write_efi_gpu_pref amd || die "Could not set the AMD preference."
+    disarm_gpu_fallback
     ok "Next-boot preference is AMD Radeon Pro; no running display route was changed"
   fi
   warn "Reboot required. Keep macOS/recovery boot media available until the next boot is verified."
@@ -723,7 +848,9 @@ verify_gpu(){
     fail "Could not identify a connected internal eDP panel with a valid EDID"
     rc=1
   fi
-  if [[ "$efi" == "intel" || "$efi" == "amd" ]]; then
+  if [[ "$cur" == "intel" && "$efi" == "amd" && -e "$GPU_FALLBACK_MARKER" ]]; then
+    warn "Unconfirmed iGPU trial is active; AMD is intentionally selected for the next reboot"
+  elif [[ "$efi" == "intel" || "$efi" == "amd" ]]; then
     [[ "$cur" == "$efi" ]] || { fail "Active display GPU does not match the saved EFI preference (pending reboot or failed switch)"; rc=1; }
   else
     warn "EFI GPU preference is $efi; no active/next-boot match can be asserted"
@@ -822,46 +949,123 @@ restore_limine_arg(){
 }
 
 remove_script_aq_file(){
-  local file="$1"
+  local file="$1" tmp mode uid gid
   [[ -f "$file" ]] || return 0
-  if awk 'NF && $0 !~ /^(export )?AQ_DRM_DEVICES=\/dev\/dri\/card[0-9]+:\/dev\/dri\/card[0-9]+$/ { bad=1 } END { exit bad }' "$file"; then
-    rm -f "$file"
-  else
-    warn "Preserving $file because it contains settings other than the legacy script AQ_DRM_DEVICES line"
-  fi
+  mode="$(stat -c %a "$file")"; uid="$(stat -c %u "$file")"; gid="$(stat -c %g "$file")"
+  tmp="$(mktemp)"
+  awk '$0 !~ /^(export )?AQ_DRM_DEVICES=\/dev\/dri\/card[0-9]+:\/dev\/dri\/card[0-9]+$/' "$file" > "$tmp"
+  if cmp -s "$tmp" "$file"; then rm -f "$tmp"; return 0; fi
+  if [[ -s "$tmp" ]]; then install -m "$mode" -o "$uid" -g "$gid" "$tmp" "$file"; else rm -f "$file"; fi
+  rm -f "$tmp"
 }
 
-cleanup_legacy_graphics(){
-  need_root; preflight_model
-  local changed_boot=0 home hypr monitors
-  if grep -Fqx 'KERNEL_CMDLINE[default]+=" video=eDP-2:d"' "$LIMINE" 2>/dev/null; then
-    remove_exact_limine_arg "video=eDP-2:d"
-    changed_boot=1
+remove_legacy_sleep_conf(){
+  local file="$SLEEP_CONF" tmp mode uid gid
+  [[ -f "$file" ]] || return 0
+  mode="$(stat -c %a "$file")"; uid="$(stat -c %u "$file")"; gid="$(stat -c %g "$file")"
+  tmp="$(mktemp)"
+  awk '$0 != "SuspendState=freeze" && $0 != "MemorySleepMode=s2idle"' "$file" > "$tmp"
+  if cmp -s "$tmp" "$file"; then rm -f "$tmp"; return 0; fi
+  if awk 'NF && $0 != "[Sleep]" { keep=1 } END { exit !keep }' "$tmp"; then
+    install -m "$mode" -o "$uid" -g "$gid" "$tmp" "$file"
+  else
+    rm -f "$file"
   fi
-  sed -i '/^AQ_DRM_DEVICES=\/dev\/dri\/card[0-9]\+:\/dev\/dri\/card[0-9]\+$/d' /etc/environment 2>/dev/null || true
+  rm -f "$tmp"
+}
+
+report_legacy_configuration(){
+  local home="$1" found=0 file
+  for file in "$LIMINE" "$SLEEP_CONF" "$SYSTEM_ENVIRONMENT" \
+    "$home/.config/environment.d/10-graphics.conf" \
+    "$home/.config/uwsm/env.d/10-graphics" "$home/.config/uwsm/default" \
+    "$home/.config/hypr/hyprland.lua" "$home/.config/hypr/monitors.lua"; do
+    [[ -f "$file" ]] || continue
+    if grep -nE 'video=eDP-2:d|mem_sleep_default=s2idle|(^|[[:space:]])iommu=pt|intel_iommu=on|SuspendState=freeze|MemorySleepMode=s2idle|AQ_DRM_DEVICES|hl\.monitor\(\{ output = "eDP-[12]"' "$file"; then
+      echo "  in $file"
+      found=1
+    fi
+  done
+  (( found )) || echo "  none"
+}
+
+cleanup_legacy_all(){
+  need_root; preflight_model
+  local option="${1:-}" changed_boot=0 changed_system=0 changed_user=0 home hypr monitors file arg line
+  local -a homes=()
+  [[ -z "$option" || "$option" == "--dry-run" ]] || die "Usage: sudo $0 cleanup-legacy-all [--dry-run]"
   home="$(target_user_home || true)"
   if [[ -n "$home" && -d "$home" ]]; then
-    remove_script_aq_file "$home/.config/environment.d/10-graphics.conf"
-    remove_script_aq_file "$home/.config/uwsm/env.d/10-graphics"
-    remove_script_aq_file "$home/.config/uwsm/default"
+    homes+=("$home")
+  else
+    for home in /home/*; do [[ -d "$home" ]] && homes+=("$home"); done
+  fi
+  if [[ "$option" == "--dry-run" ]]; then
+    echo "Legacy entries that the cleanup command recognizes:"
+    if ((${#homes[@]})); then
+      for home in "${homes[@]}"; do report_legacy_configuration "$home"; done
+    else
+      report_legacy_configuration /nonexistent
+    fi
+    return 0
+  fi
+
+  install -d -m 0755 "$STATE"
+  backup_once "$LIMINE" "cleanup-legacy-all.limine.before"
+  backup_once "$SLEEP_CONF" "cleanup-legacy-all.sleep-conf.before"
+  backup_once "$SYSTEM_ENVIRONMENT" "cleanup-legacy-all.environment.before"
+  for arg in video=eDP-2:d mem_sleep_default=s2idle iommu=pt intel_iommu=on; do
+    line="KERNEL_CMDLINE[default]+=\" $arg\""
+    grep -Fqx "$line" "$LIMINE" 2>/dev/null && changed_boot=1
+    remove_exact_limine_arg "$arg"
+  done
+  grep -Eq '^(SuspendState=freeze|MemorySleepMode=s2idle)$' "$SLEEP_CONF" 2>/dev/null && changed_system=1
+  remove_legacy_sleep_conf
+  sed -i '/^AQ_DRM_DEVICES=\/dev\/dri\/card[0-9]\+:\/dev\/dri\/card[0-9]\+$/d' "$SYSTEM_ENVIRONMENT" 2>/dev/null || true
+  for home in "${homes[@]}"; do
+    for file in "$home/.config/environment.d/10-graphics.conf" \
+      "$home/.config/uwsm/env.d/10-graphics" "$home/.config/uwsm/default" \
+      "$home/.config/hypr/hyprland.lua" "$home/.config/hypr/monitors.lua"; do
+      [[ -f "$file" ]] || continue
+      backup_once "$file" "cleanup-legacy-all.$(basename "$home").$(basename "$(dirname "$file")").$(basename "$file").before"
+    done
+    for file in "$home/.config/environment.d/10-graphics.conf" \
+      "$home/.config/uwsm/env.d/10-graphics" "$home/.config/uwsm/default"; do
+      grep -Eq '^(export )?AQ_DRM_DEVICES=/dev/dri/card[0-9]+:/dev/dri/card[0-9]+$' "$file" 2>/dev/null && changed_user=1
+      remove_script_aq_file "$file"
+    done
     hypr="$home/.config/hypr/hyprland.lua"
     monitors="$home/.config/hypr/monitors.lua"
+    grep -q 'hl.env("AQ_DRM_DEVICES", "/dev/dri/card' "$hypr" 2>/dev/null && changed_user=1
     [[ ! -f "$hypr" ]] || sed -i '/^[[:space:]]*hl\.env("AQ_DRM_DEVICES", "\/dev\/dri\/card[0-9]\+:\/dev\/dri\/card[0-9]\+")[[:space:]]*$/d' "$hypr"
     if [[ -f "$monitors" ]]; then
+      grep -Fq 'hl.monitor({ output = "eDP-2", disabled = true })' "$monitors" && changed_user=1
       sed -i '/^[[:space:]]*hl\.monitor({ output = "eDP-2", disabled = true })[[:space:]]*$/d' "$monitors"
       sed -i '/^[[:space:]]*hl\.monitor({ output = "eDP-1", mode = "preferred", position = "0x0", scale = omarchy_monitor_scale })[[:space:]]*$/d' "$monitors"
     fi
-  fi
+  done
   if (( changed_boot )); then
     have limine-update || die "Removed legacy Limine source configuration, but limine-update is unavailable. Install/fix Limine before rebooting."
     limine-update
   fi
-  ok "Legacy hard-coded DRM card ordering and eDP connector overrides removed"
-  warn "Log out and back in (or reboot) before GPU preflight if a user graphics file changed."
+  if legacy_configuration_present; then
+    fail "Some graphics or boot overrides remain and require manual review:"
+    if ((${#homes[@]})); then
+      for home in "${homes[@]}"; do report_legacy_configuration "$home"; done
+    else
+      report_legacy_configuration /nonexistent
+    fi
+    return 1
+  fi
+  ok "Legacy hard-coded DRM/eDP and forced s2idle/IOMMU overrides removed"
+  (( changed_boot || changed_system || changed_user )) && warn "Reboot before running any GPU or suspend command."
 }
+
+cleanup_legacy_graphics(){ cleanup_legacy_all "$@"; }
 
 rollback(){
   need_root; preflight_model
+  disarm_gpu_fallback
   systemctl disable --now touchbar.service >/dev/null 2>&1 || true
   systemctl disable --now mbp15-nvme-d3cold.service >/dev/null 2>&1 || true
   systemctl disable --now mbp13-nvme-d3cold.service >/dev/null 2>&1 || true
@@ -935,8 +1139,9 @@ Usage:
   sudo $0 install-cooling
   sudo $0 install-mbpfan
   sudo $0 install-audio --ack-kernel-risk
-  sudo $0 cleanup-legacy-graphics
+  sudo $0 cleanup-legacy-all [--dry-run]
   sudo $0 gpu-igpu --yes
+  sudo $0 gpu-confirm-igpu --yes
   sudo $0 gpu-dgpu --yes
   sudo reboot
   sudo $0 verify
@@ -949,7 +1154,9 @@ Commands:
   install-base     Install dependencies only; there is deliberately no full one-shot install
   install-cooling  Deploy a conservative CPU policy without changing displays
   install-mbpfan   Optionally build the pinned active fan daemon
-  gpu-igpu         Preflight Intel/i915 and external displays, then set next-boot EFI preference
+  cleanup-legacy-all Remove exact display and forced sleep/IOMMU settings left by older releases
+  gpu-igpu         Start a one-boot iGPU trial with automatic next-boot AMD fallback
+  gpu-confirm-igpu Confirm a working Intel session and cancel automatic AMD fallback
   gpu-dgpu         Set next-boot AMD EFI preference; neither GPU command edits Hyprland
   install-suspend  Deploy only pcie_ports=compat and the NVMe D3cold service
   install-touchbar Build the pinned Touch Bar DKMS driver without a blocking resume hook
@@ -965,8 +1172,9 @@ if [[ "${MBP15_LIB_ONLY:-0}" != "1" ]]; then
     install-suspend|install-nvme) need_root; preflight; install_suspend ;;
     install-cooling|install-thermal) need_root; preflight_model; install_cooling ;;
     install-mbpfan) need_root; preflight_model; install_mbpfan ;;
-    cleanup-legacy-graphics) cleanup_legacy_graphics ;;
+    cleanup-legacy-all|cleanup-legacy-graphics) shift; cleanup_legacy_all "$@" ;;
     gpu-igpu|switch-igpu) shift; [[ $# -eq 1 ]] || die "Usage: sudo $0 gpu-igpu --yes"; need_root; preflight_model; switch_gpu intel "$1" ;;
+    gpu-confirm-igpu|confirm-igpu) shift; [[ $# -eq 1 ]] || die "Usage: sudo $0 gpu-confirm-igpu --yes"; need_root; preflight_model; confirm_igpu "$1" ;;
     gpu-dgpu|switch-dgpu) shift; [[ $# -eq 1 ]] || die "Usage: sudo $0 gpu-dgpu --yes"; need_root; preflight_model; switch_gpu amd "$1" ;;
     install-touchbar) need_root; preflight; install_touchbar ;;
     install-audio) shift; [[ $# -eq 1 ]] || die "Usage: sudo $0 install-audio --ack-kernel-risk"; need_root; preflight; install_audio "$1" ;;
