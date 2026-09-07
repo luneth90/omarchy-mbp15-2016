@@ -50,6 +50,7 @@ SLEEP_CONF="/etc/systemd/sleep.conf.d/30-mbp15-suspend.conf"
 NVME_UNIT="/etc/systemd/system/mbp15-nvme-d3cold.service"
 
 MBPFAN_CONF="/etc/mbpfan.conf"
+MBPFAN_UNIT="/etc/systemd/system/mbpfan.service"
 COOLING_UNIT="/etc/systemd/system/macbook-cpu-cooling.service"
 EFI_VARS="/sys/firmware/efi/efivars"
 EFI_GPU_VAR="gpu-power-prefs-fa4ce28d-b62f-4c99-9cc3-6815686e30f9"
@@ -63,8 +64,13 @@ need_root(){ [[ ${EUID:-$(id -u)} -eq 0 ]] || die "Run with sudo/root."; }
 have(){ command -v "$1" >/dev/null 2>&1; }
 
 model(){ cat /sys/devices/virtual/dmi/id/product_name 2>/dev/null || true; }
-preflight(){
-  [[ "$(model)" == "$MODEL" ]] || die "This script targets $MODEL; detected $(model)."
+preflight_model(){
+  local detected
+  detected="$(model)"
+  [[ "$detected" == "$MODEL" ]] || die "This script targets $MODEL; detected ${detected:-unknown}."
+  ok "$MODEL detected"
+}
+preflight_t1(){
   local p=""
   for d in /sys/bus/usb/devices/*/; do
     [[ "$(cat "$d/idVendor" 2>/dev/null || true)" == "05ac" ]] || continue
@@ -75,9 +81,9 @@ preflight(){
     die "T1/iBridge is in DFU recovery mode (05ac:1281). Missing Touch Bar firmware! Omarchy must be dual-booted with macOS preserved; clean wipe/format installs erase required bridgeOS firmware."
   fi
   [[ "$p" == "8600" ]] || die "T1/iBridge is not healthy (expected 05ac:8600, got ${p:-unknown})."
-  ok "$MODEL detected"
   ok "T1/iBridge 05ac:8600 detected"
 }
+preflight(){ preflight_model; preflight_t1; }
 
 backup_once(){
   local src="$1" name="$2"
@@ -255,7 +261,18 @@ verify_webcam(){
 # ---------- Fans / Thermal sensors ----------
 verify_fans_thermal(){
   log "Fans & Thermal sensors (Apple SMC)"
-  local smc_dir="" f rpm manual count=0
+  local smc_dir="" coretemp_dir="" d f tf rpm manual count=0
+
+  modprobe coretemp 2>/dev/null || true
+  for d in /sys/devices/platform/coretemp.*; do
+    [[ -d "$d" ]] && { coretemp_dir="$d"; break; }
+  done
+  if [[ -z "$coretemp_dir" ]]; then
+    fail "CPU core temperature interface not found; coretemp driver not loaded"
+    return 1
+  fi
+  ok "CPU core temperature sensors detected at $(basename "$coretemp_dir")"
+
   for d in /sys/devices/platform/applesmc.*; do
     [[ -d "$d" ]] && { smc_dir="$d"; break; }
   done
@@ -279,7 +296,7 @@ verify_fans_thermal(){
     rpm="$(cat "$f" 2>/dev/null || echo 0)"
     manual="$(cat "$smc_dir/fan${fan_num}_manual" 2>/dev/null || echo "?")"
     echo "  Fan $fan_num: ${rpm} RPM (manual=$manual [0=firmware-managed])"
-    ((count++))
+    ((++count))
   done
   if (( count == 0 )); then
     fail "No fan inputs found under Apple SMC"
@@ -293,7 +310,7 @@ verify_fans_thermal(){
     fi
   done
   [[ -n "$t" ]] && echo "  Current temperature: $t"
-  ok "Fans and thermal sensors operating under SMC firmware management"
+  ok "Fan and thermal sensor interfaces are available"
 }
 
 # ---------- Suspend / NVMe ----------
@@ -380,23 +397,46 @@ verify_suspend(){
 install_cooling(){
   log "Installing mbpfan (active thermal & fan daemon)"
   local user="${SUDO_USER:-${USER:-root}}"
-  local pkg_cache="/home/$user/.cache/yay/mbpfan"
+  local user_home pkg_cache
+  user_home="$(getent passwd "$user" | cut -d: -f6)"
+  pkg_cache="${user_home:-/home/$user}/.cache/yay/mbpfan"
   local pkg=""
-  if [[ -d "$pkg_cache" ]]; then
-    pkg="$(find "$pkg_cache" -maxdepth 1 -name "mbpfan-[0-9]*.pkg.tar.zst" ! -name "*debug*" 2>/dev/null | head -n 1)"
-  fi
 
-  if [[ -n "$pkg" && -f "$pkg" ]]; then
-    log "Installing pre-built mbpfan package: $pkg"
-    pacman -U --noconfirm --needed "$pkg"
-  else
-    log "Compiling mbpfan from source..."
-    git_sync "$MBPFAN_URL" "$MBPFAN_REPO"
-    ( cd "$MBPFAN_REPO" && make && make install )
-  fi
+  verify_fans_thermal || die "Cooling hardware preflight failed; refusing to install mbpfan."
 
+  # Upstream's source installer overwrites mbpfan.conf and does not install its
+  # bundled systemd unit, so preserve local state before either install path.
   backup_once "$MBPFAN_CONF" "mbpfan.conf.before"
+  backup_once "$MBPFAN_UNIT" "mbpfan.service.before"
   backup_once "$COOLING_UNIT" "macbook-cpu-cooling.service.before"
+
+  if [[ -d "$pkg_cache" ]]; then
+    pkg="$(find "$pkg_cache" -maxdepth 1 -name "mbpfan-[0-9]*.pkg.tar.zst" ! -name "*debug*" 2>/dev/null | sort -V | tail -n 1)"
+  fi
+
+  if have mbpfan; then
+    ok "mbpfan executable already installed; skipping package/source installation"
+  else
+    have pacman || die "pacman not found; this script targets Omarchy/Arch."
+    if [[ -n "$pkg" && -f "$pkg" ]]; then
+      log "Installing pre-built mbpfan package: $pkg"
+      pacman -U --noconfirm --needed "$pkg"
+    else
+      if ! have git || ! have make || ! have cc; then
+        log "Installing mbpfan build dependencies"
+        pacman -S --needed --noconfirm base-devel git
+      fi
+      log "Compiling mbpfan from source..."
+      git_sync "$MBPFAN_URL" "$MBPFAN_REPO"
+      ( cd "$MBPFAN_REPO" && make && make install )
+    fi
+  fi
+
+  local mbpfan_bin modprobe_bin
+  mbpfan_bin="$(command -v mbpfan || true)"
+  [[ -n "$mbpfan_bin" && "$mbpfan_bin" == /* ]] || die "mbpfan installed, but its executable was not found in PATH."
+  modprobe_bin="$(command -v modprobe || true)"
+  [[ -n "$modprobe_bin" && "$modprobe_bin" == /* ]] || die "modprobe not found; cannot load cooling kernel modules."
 
   log "Configuring mbpfan for MacBookPro13,3"
   cat > "$MBPFAN_CONF" <<'EOF'
@@ -411,9 +451,29 @@ max_temp = 78       # At 78°C: maximum fan speed
 polling_interval = 2
 EOF
 
+  # `make install` from linux-on-mac/mbpfan does not copy mbpfan.service.
+  # Install our own unit so both the AUR-package and source-build paths work.
+  cat > "$MBPFAN_UNIT" <<EOF
+[Unit]
+Description=MacBook Pro fan manager daemon
+After=systemd-modules-load.service
+
+[Service]
+Type=simple
+ExecStartPre=$modprobe_bin coretemp
+ExecStartPre=$modprobe_bin applesmc
+ExecStart=$mbpfan_bin -f
+ExecReload=/usr/bin/kill -HUP \$MAINPID
+Restart=on-failure
+RestartSec=1
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
   systemctl daemon-reload
-  systemctl enable --now mbpfan
-  systemctl restart mbpfan
+  systemctl enable mbpfan.service
+  systemctl restart mbpfan.service
 
   log "Configuring CPU power & thermal policy"
   if have powerprofilesctl; then
@@ -423,7 +483,7 @@ EOF
   cat > "$COOLING_UNIT" <<'EOF'
 [Unit]
 Description=MacBookPro CPU Thermal & Power Optimization
-After=multi-user.target
+After=power-profiles-daemon.service
 
 [Service]
 Type=oneshot
@@ -436,14 +496,12 @@ EOF
 
   systemctl daemon-reload
   systemctl enable --now macbook-cpu-cooling.service
+  verify_cooling || die "Cooling services failed post-install verification."
 
   log "Configuring graphics environment & disabling phantom display"
   append_cmdline "video=eDP-2:d"
   have limine-update && limine-update || true
 
-  local user="${SUDO_USER:-${USER:-root}}"
-  local user_home
-  user_home="$(getent passwd "$user" | cut -d: -f6)"
   if [[ -n "$user_home" && -d "$user_home" && "$user" != "root" ]]; then
     local ic; ic="$(intel_card)"
     local ac; ac="$(amd_card)"
@@ -492,16 +550,24 @@ EOF
 
 verify_cooling(){
   log "Cooling & Fan Daemon (mbpfan)"
-  if systemctl is-active --quiet mbpfan; then
+  local rc=0
+  if systemctl is-active --quiet mbpfan.service; then
     ok "mbpfan.service is active"
   else
     fail "mbpfan.service is inactive"
-    return 1
+    rc=1
+  fi
+  if systemctl is-active --quiet macbook-cpu-cooling.service; then
+    ok "macbook-cpu-cooling.service is active"
+  else
+    fail "macbook-cpu-cooling.service is inactive"
+    rc=1
   fi
   if [[ -f /sys/devices/system/cpu/intel_pstate/no_turbo ]]; then
     local nt; nt="$(cat /sys/devices/system/cpu/intel_pstate/no_turbo 2>/dev/null || echo 0)"
     if [[ "$nt" == "1" ]]; then ok "CPU Turbo Boost disabled (low heat mode)"; else warn "CPU Turbo Boost enabled (higher heat)"; fi
   fi
+  return "$rc"
 }
 
 # ---------- GPU Switching (apple-gmux / EFI) ----------
@@ -676,7 +742,7 @@ status(){
 verify(){
   need_root; preflight; local rc=0
   verify_gpu || true
-  verify_cooling || true
+  verify_cooling || rc=1
   verify_wifi || rc=1
   verify_applespi || rc=1
   verify_webcam || rc=1
@@ -743,6 +809,7 @@ rollback(){
   restore_or_remove "$SLEEP_CONF" "30-mbp15-suspend.conf.before"
   restore_or_remove "$NVME_UNIT" "mbp15-nvme-d3cold.service.before"
   restore_or_remove "$MBPFAN_CONF" "mbpfan.conf.before"
+  restore_or_remove "$MBPFAN_UNIT" "mbpfan.service.before"
   restore_or_remove "$COOLING_UNIT" "macbook-cpu-cooling.service.before"
   if [[ -e "$STATE/macbook-t1.conf.before" ]]; then cp -a "$STATE/macbook-t1.conf.before" "$LIMINE"; fi
   if [[ -e "$WIFI_BAK" ]]; then cp -a "$WIFI_BAK" "$WIFI_FILE"; fi
@@ -800,7 +867,7 @@ case "${1:-}" in
   status) status ;;
   install|apply) shift; install_all "$@" ;;
   install-suspend|install-nvme) need_root; preflight; install_suspend ;;
-  install-cooling|install-thermal) need_root; preflight; install_cooling ;;
+  install-cooling|install-thermal) need_root; preflight_model; install_cooling ;;
   gpu-igpu|switch-igpu) need_root; preflight; switch_gpu intel ;;
   gpu-dgpu|switch-dgpu) need_root; preflight; switch_gpu amd ;;
   install-touchbar) need_root; preflight; install_touchbar ;;
