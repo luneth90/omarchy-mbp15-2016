@@ -16,29 +16,86 @@ Keep macOS, Apple EFI, and Recovery intact. See the upstream model notes in [Dun
 
 ## Safe staged installation
 
-Prepare a known-good macOS/recovery boot path, save all work, disconnect docks and displays, and record the real Wi-Fi MAC in macOS with `networksetup -getmacaddress en0`.
+The recommended daily-use baseline keeps the AMD GPU active and includes working internal audio. iGPU switching and suspend are separate experiments, not part of the default installation path.
 
-Run each stage separately and verify a successful boot before continuing:
+### 0. Freeze the test environment and prepare recovery
+
+For a fresh target deployment, prefer Omarchy `stable`; `edge` is not a prerequisite. If the machine already runs a working `edge` installation, do not change channel just for this script. Record the exact environment and do not update Omarchy, change kernel, switch channel, or pull a newer script revision between stages:
+
+```bash
+omarchy channel current
+omarchy version
+uname -r
+git rev-parse HEAD
+```
+
+Keep macOS, Apple EFI, and Recovery bootable. Confirm that a known-good AMD or older-kernel entry is available, save all work, disconnect docks/displays and nonessential peripherals, and record the real Wi-Fi MAC in macOS with `networksetup -getmacaddress en0`.
+
+### 1. Verify the target and remove legacy overrides first
 
 ```bash
 chmod +x omarchy-mbp15-2016.sh
 sudo ./omarchy-mbp15-2016.sh status
+lspci -nnv -s 01:00.0
+sudo ./omarchy-mbp15-2016.sh cleanup-legacy-all --dry-run
+```
+
+For a Radeon Pro 460, the PCI output must contain device `1002:67ef` and Apple subsystem `106b:0160`. Do not continue when the physical identity is not the expected machine. If and only if the dry run reports legacy settings from an older script, remove them before installing anything else:
+
+```bash
+sudo ./omarchy-mbp15-2016.sh cleanup-legacy-all
+sudo reboot
+sudo ./omarchy-mbp15-2016.sh status
+```
+
+### 2. Install the base and establish an AMD baseline
+
+```bash
 sudo ./omarchy-mbp15-2016.sh install-base
+sudo reboot
+sudo ./omarchy-mbp15-2016.sh status
+```
+
+`install-base` installs dependencies and checks the exact running-kernel headers. It does not install a hardware driver, change GPU preference, or install suspend configuration. Verify several successful AMD cold boots/reboots before continuing.
+
+### 3. Install required hardware stages one at a time
+
+Install and verify lower-risk stages first:
+
+```bash
+sudo ./omarchy-mbp15-2016.sh install-cooling
+sudo ./omarchy-mbp15-2016.sh verify-cooling
+
+sudo ./omarchy-mbp15-2016.sh install-wifi AA:BB:CC:DD:EE:FF
+sudo reboot
+sudo ./omarchy-mbp15-2016.sh verify-wifi
 
 sudo ./omarchy-mbp15-2016.sh install-touchbar
 sudo reboot
 sudo ./omarchy-mbp15-2016.sh verify-touchbar
-
-sudo ./omarchy-mbp15-2016.sh install-suspend
-sudo reboot
-sudo ./omarchy-mbp15-2016.sh verify-suspend
-
-sudo ./omarchy-mbp15-2016.sh cleanup-legacy-all --dry-run
-sudo ./omarchy-mbp15-2016.sh cleanup-legacy-all
-sudo reboot
 ```
 
-Next, configure your bootloader to execute a trusted `apple_set_os.efi` on every iGPU boot. This is intentionally not automated because EFI layouts differ. The upstream `MacBookPro13,3` example used rEFInd with `spoof_osx_version 10.12`; verify current syntax for your rEFInd version and do not copy that setting to a different bootloader. Reboot while retaining AMD preference, then confirm:
+Apple SMC already manages the fans. Active fan control remains an optional, separate stage:
+
+```bash
+sudo ./omarchy-mbp15-2016.sh install-mbpfan
+```
+
+### 4. Install required audio last in the AMD baseline
+
+Internal audio is required for a complete installation on this machine. Its out-of-tree driver has kernel-specific crash reports, so it is installed alone after every other required stage is stable. The source is pinned and explicit acknowledgement is required, but future-kernel compatibility cannot be guaranteed:
+
+```bash
+sudo ./omarchy-mbp15-2016.sh install-audio --ack-kernel-risk
+sudo reboot
+sudo ./omarchy-mbp15-2016.sh verify-audio
+```
+
+Test speakers, headphones, microphone, another reboot, and normal workload. This working AMD configuration, including audio, is the recommended completion point. Do not proceed to iGPU or suspend unless those experimental features are specifically required.
+
+## Optional experiment: iGPU
+
+Configure the bootloader to execute a trusted `apple_set_os.efi` on every iGPU boot. This is intentionally not automated because EFI layouts differ. The upstream `MacBookPro13,3` example used rEFInd with `spoof_osx_version 10.12`; verify current syntax for the installed rEFInd version and do not copy that setting to another bootloader. Reboot while retaining AMD preference, then confirm:
 
 ```bash
 lspci -nnk -s 00:02.0
@@ -61,28 +118,32 @@ sudo ./omarchy-mbp15-2016.sh gpu-dgpu --yes
 sudo reboot
 ```
 
-Finish lower-risk components separately:
+## Optional experiment: suspend
+
+Do not install suspend configuration until the iGPU session above has been confirmed and survived repeated boots. Then, while physically present and with no external display:
 
 ```bash
-sudo ./omarchy-mbp15-2016.sh install-wifi AA:BB:CC:DD:EE:FF
+sudo ./omarchy-mbp15-2016.sh install-suspend
 sudo reboot
-sudo ./omarchy-mbp15-2016.sh install-cooling
-# Optional active fan control:
-sudo ./omarchy-mbp15-2016.sh install-mbpfan
-```
-
-Run suspend tests only while physically present, on Intel internal graphics, with no external display:
-
-```bash
+sudo ./omarchy-mbp15-2016.sh verify-suspend
 sudo ./omarchy-mbp15-2016.sh pm-test --yes
-# Save work before the first real test:
+# Save all work before the first real test:
 sudo systemctl suspend
 ```
 
-Install audio last. Its out-of-tree driver has had kernel-specific crash reports, so the source is pinned and explicit acknowledgement is required, but compatibility with future kernels cannot be guaranteed:
+## After any black screen, hang, or failed boot
+
+Do not immediately reinstall and erase the evidence. After recovering by the AMD/recovery path, collect the previous-boot logs first:
 
 ```bash
-sudo ./omarchy-mbp15-2016.sh install-audio --ack-kernel-risk
+sudo ./omarchy-mbp15-2016.sh previous-boot
+sudo journalctl -b -1 -k
+```
+
+Then roll back if needed:
+
+```bash
+sudo ./omarchy-mbp15-2016.sh rollback
 sudo reboot
 ```
 

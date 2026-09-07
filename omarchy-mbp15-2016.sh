@@ -220,7 +220,7 @@ verify_applespi(){
 
 # ---------- Audio ----------
 install_audio(){
-  [[ "${1:-}" == "--ack-kernel-risk" ]] || die "Audio is optional and can crash incompatible kernels. Re-run as: sudo $0 install-audio --ack-kernel-risk"
+  [[ "${1:-}" == "--ack-kernel-risk" ]] || die "Audio is required for complete internal sound but can crash incompatible kernels. Re-run as: sudo $0 install-audio --ack-kernel-risk"
   require_reviewed_kernel_family
   require_kernel_headers
   git_sync "$AUDIO_URL" "$AUDIO_REPO" "$AUDIO_REF"
@@ -1160,7 +1160,7 @@ Commands:
   gpu-dgpu         Set next-boot AMD EFI preference; neither GPU command edits Hyprland
   install-suspend  Deploy only pcie_ports=compat and the NVMe D3cold service
   install-touchbar Build the pinned Touch Bar DKMS driver without a blocking resume hook
-  install-audio    Opt-in pinned audio DKMS; install last because kernel compatibility varies
+  install-audio    Required final-stage audio DKMS; explicit risk acknowledgement is mandatory
 USAGE
 }
 

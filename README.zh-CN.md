@@ -26,56 +26,93 @@
 
 ## 可靠安装顺序
 
-每个阶段完成后先验证，再进行下一阶段。不要在无人值守或没有物理接触机器时测试重启/挂起。
+推荐的日常使用基线是保持 AMD 独显，并安装可用的内置音频。iGPU 切换和挂起是两个独立实验，不属于默认安装路径。每个阶段完成后先验证，再进行下一阶段；不要在无人值守或无法物理接触机器时测试重启或挂起。
 
-### 0. 准备恢复路径
+### 0. 固定测试环境并准备恢复路径
 
-1. 确认 macOS 和 Apple 启动选择器仍可启动。
-2. 保存工作，拔掉所有 USB-C 显示器、扩展坞和非必要外设。
-3. 在 macOS 记录真实 Wi-Fi MAC：`networksetup -getmacaddress en0`。
-4. 确认当前 Linux 能从启动菜单选择旧内核或 AMD 路径。
+全新部署目标机器时优先使用 Omarchy `stable`，运行此脚本不要求 `edge`。如果机器已经在可正常工作的 `edge` 上，不要仅为了脚本切换 channel。先记录精确环境；整个分阶段验收期间不要更新 Omarchy/内核、切换 channel 或拉取新版脚本：
 
-### 1. 基础预检与依赖
+```bash
+omarchy channel current
+omarchy version
+uname -r
+git rev-parse HEAD
+```
+
+然后完成以下准备：
+
+1. 确认 macOS、Apple EFI 和 Recovery 仍可启动。
+2. 确认启动菜单中存在已知可用的 AMD 或旧内核恢复入口。
+3. 保存工作，拔掉所有 USB-C 显示器、扩展坞和非必要外设。
+4. 在 macOS 记录真实 Wi-Fi MAC：`networksetup -getmacaddress en0`。
+
+### 1. 核对目标硬件并首先清理旧配置
 
 ```bash
 chmod +x omarchy-mbp15-2016.sh
 sudo ./omarchy-mbp15-2016.sh status
-sudo ./omarchy-mbp15-2016.sh install-base
+lspci -nnv -s 01:00.0
+sudo ./omarchy-mbp15-2016.sh cleanup-legacy-all --dry-run
 ```
 
-`install-base` 会检查 DMI 型号、T1 状态和当前运行内核的精确 headers。它不会安装硬件驱动或修改引导项。
-
-### 2. Touch Bar（先单独完成）
+目标 Radeon Pro 460 的 PCI 输出必须同时包含设备 `1002:67ef` 和 Apple 子系统 `106b:0160`。物理身份不符合时不要继续。如果 dry-run 确实报告旧版脚本遗留配置，必须在安装其他组件之前执行清理：
 
 ```bash
+sudo ./omarchy-mbp15-2016.sh cleanup-legacy-all
+sudo reboot
+sudo ./omarchy-mbp15-2016.sh status
+```
+
+全新系统没有遗留项时，不需要执行实际清理命令。
+
+### 2. 安装基础依赖并建立 AMD 基线
+
+```bash
+sudo ./omarchy-mbp15-2016.sh install-base
+sudo reboot
+sudo ./omarchy-mbp15-2016.sh status
+```
+
+`install-base` 会检查 DMI 型号、T1 状态和当前运行内核的精确 headers。它只安装依赖，不安装硬件驱动，不修改 GPU 偏好，也不安装挂起配置。先确认 AMD 模式能够连续完成数次重启和冷启动，再继续。
+
+### 3. 逐项安装必要硬件功能
+
+先安装并验证风险较低的功能：
+
+```bash
+sudo ./omarchy-mbp15-2016.sh install-cooling
+sudo ./omarchy-mbp15-2016.sh verify-cooling
+
+sudo ./omarchy-mbp15-2016.sh install-wifi AA:BB:CC:DD:EE:FF
+sudo reboot
+sudo ./omarchy-mbp15-2016.sh verify-wifi
+
 sudo ./omarchy-mbp15-2016.sh install-touchbar
 sudo reboot
 sudo ./omarchy-mbp15-2016.sh verify-touchbar
 ```
 
-驱动源码固定到脚本内记录的提交。模块延迟加载以避开早期启动竞争；脚本不会在阻塞式 `system-sleep` 钩子中自动卸载 HID 内核模块，以免恢复链卡死。确认正常启动、键盘/触控板和 Touch Bar 工作后再继续；若唤醒后只有 Touch Bar 失效，先收集日志，不要用自动 `rmmod` 钩子掩盖问题。
+Wi-Fi 文件固定来源并校验 SHA-256。`install-cooling` 只设置 CPU 省电/禁用 Turbo 策略，不修改显示配置。Touch Bar 驱动源码固定到脚本内记录的提交，模块延迟加载以避开早期启动竞争；脚本不会在阻塞式 `system-sleep` 钩子中自动卸载 HID 内核模块，以免恢复链卡死。
 
-### 3. 最小挂起配置
-
-```bash
-sudo ./omarchy-mbp15-2016.sh install-suspend
-sudo reboot
-sudo ./omarchy-mbp15-2016.sh verify-suspend
-```
-
-此阶段只加入 `pcie_ports=compat`，并启用针对实际 NVMe PCI 地址的 D3cold 服务；不再强制 `s2idle`、IOMMU 或覆盖其他 Omarchy 服务。此时不要直接做真实挂起。
-
-### 4. 清理旧版显示与强制休眠配置
-
-如果曾运行旧版脚本，务必执行：
+Apple SMC 本身会管理风扇；只有确实需要主动风扇曲线时才单独安装：
 
 ```bash
-sudo ./omarchy-mbp15-2016.sh cleanup-legacy-all --dry-run
-sudo ./omarchy-mbp15-2016.sh cleanup-legacy-all
-sudo reboot
+sudo ./omarchy-mbp15-2016.sh install-mbpfan
 ```
 
-它先备份再移除旧脚本的精确 `AQ_DRM_DEVICES=/dev/dri/cardN:...`、`video=eDP-2:d`、固定 Hyprland monitor 注入、`30-mbp15-suspend.conf` 中的强制 `freeze/s2idle`，以及旧版加入的 `mem_sleep_default=s2idle`、`iommu=pt`、`intel_iommu=on`。混合配置中的其他内容会保留；在救援环境以纯 root 执行时会扫描 `/home/*`。
+### 4. 最后安装必需的音频驱动
+
+内置音频是这台机器完成安装后的必要功能。由于它使用的树外驱动存在随内核变化而崩溃的上游报告，必须等其他必要阶段稳定后单独安装。脚本会固定源码提交、检查匹配 headers 并要求明确确认风险，但不能保证任意未来内核兼容：
+
+```bash
+sudo ./omarchy-mbp15-2016.sh install-audio --ack-kernel-risk
+sudo reboot
+sudo ./omarchy-mbp15-2016.sh verify-audio
+```
+
+测试扬声器、耳机、麦克风、再次重启以及正常负载。至此得到包含音频的 AMD 稳定基线，也是推荐的默认完成点。只有确实需要实验功能时，才继续下面的 iGPU 和挂起流程。
+
+## 可选实验：iGPU
 
 ### 5. 在引导器中配置 `apple_set_os`
 
@@ -112,38 +149,38 @@ sudo reboot
 
 若 Linux 无法进入，可从可写入 efivarfs 的救援环境恢复脚本保存在 `/var/lib/mbp15-2016-t1-touchbar-fix/` 的 EFI 备份；不要反复盲目重启。
 
-### 7. Wi-Fi、降温和可选风扇服务
+## 可选实验：挂起
+
+不要提前安装挂起配置。只有上述 iGPU 会话已确认，并且经历多次正常启动之后，才能在现场且没有外接屏时继续：
 
 ```bash
-sudo ./omarchy-mbp15-2016.sh install-wifi AA:BB:CC:DD:EE:FF
+sudo ./omarchy-mbp15-2016.sh install-suspend
 sudo reboot
-sudo ./omarchy-mbp15-2016.sh install-cooling
-```
-
-Wi-Fi 文件固定来源并校验 SHA-256。`install-cooling` 只设置 CPU 省电/禁用 Turbo 策略，不修改显示配置。Apple SMC 本身会管理风扇；只有确实需要主动风扇曲线时才安装：
-
-```bash
-sudo ./omarchy-mbp15-2016.sh install-mbpfan
-```
-
-### 8. 挂起测试（最后、现场执行）
-
-仅在当前内屏由 Intel 驱动、没有外接屏、静态门禁通过时：
-
-```bash
+sudo ./omarchy-mbp15-2016.sh verify-suspend
 sudo ./omarchy-mbp15-2016.sh pm-test --yes
 ```
 
-它使用 `pm_test=devices`，仍不等同于真实低功耗挂起。保存工作后再手动执行一次 `sudo systemctl suspend`；若恢复失败，重启后用 `previous-boot` 查看上一启动周期日志。
-
-### 9. 音频 DKMS（最后且可选）
+`install-suspend` 只加入 `pcie_ports=compat`，并启用针对实际 NVMe PCI 地址的 D3cold 服务；不强制 `s2idle`、IOMMU，也不覆盖其他 Omarchy 服务。`pm-test` 使用 `pm_test=devices`，仍不等同于真实低功耗挂起。保存工作后再手动执行一次：
 
 ```bash
-sudo ./omarchy-mbp15-2016.sh install-audio --ack-kernel-risk
-sudo reboot
+sudo systemctl suspend
 ```
 
-音频驱动存在随内核变化而崩溃的上游报告，因此脚本固定源码提交、要求匹配 headers，并强制风险确认，但不能保证任意未来内核兼容。安装后先测试扬声器/耳机，再做挂起测试。上游：[snd_hda_macbookpro](https://github.com/davidjo/snd_hda_macbookpro)。
+## 黑屏、死机或启动失败后
+
+不要立即重装系统并清除证据。通过 AMD 或恢复入口重新进入系统后，先保存上一启动周期日志：
+
+```bash
+sudo ./omarchy-mbp15-2016.sh previous-boot
+sudo journalctl -b -1 -k
+```
+
+需要时再执行回滚：
+
+```bash
+sudo ./omarchy-mbp15-2016.sh rollback
+sudo reboot
+```
 
 ## 命令速查
 
@@ -161,7 +198,7 @@ sudo reboot
 | `install-cooling` | CPU 省电/降温，不改显示 |
 | `install-mbpfan` | 可选主动风扇服务 |
 | `pm-test --yes` | 有条件的设备级挂起测试 |
-| `install-audio --ack-kernel-risk` | 最后安装的可选音频 DKMS |
+| `install-audio --ack-kernel-risk` | AMD 必需基线中最后单独安装的音频 DKMS |
 | `previous-boot` | 查看上一启动周期挂起/恢复日志 |
 | `rollback` | 恢复备份、EFI 偏好并移除脚本服务/DKMS |
 
