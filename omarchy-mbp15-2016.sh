@@ -2,19 +2,24 @@
 set -Eeuo pipefail
 
 # MacBookPro13,3 (2016 15-inch Touch Bar/T1) Hardware Fix Script
-# Validated target: Arch/Omarchy, Linux 7.1.x/7.2.x family.
+# Intended target: Arch/Omarchy, Linux 7.1.x/7.2.x family.
+# Out-of-tree drivers still require physical validation on MacBookPro13,3.
 #
 # Commands:
 #   sudo ./omarchy-mbp15-2016.sh status
-#   sudo ./omarchy-mbp15-2016.sh install --wifi-mac AA:BB:CC:DD:EE:FF [--switch-igpu]
-#   sudo ./omarchy-mbp15-2016.sh install --skip-wifi-nvram [--switch-igpu]
+#   sudo ./omarchy-mbp15-2016.sh install-base
+#   sudo ./omarchy-mbp15-2016.sh install-wifi AA:BB:CC:DD:EE:FF
+#   sudo ./omarchy-mbp15-2016.sh install-touchbar
 #   sudo ./omarchy-mbp15-2016.sh install-suspend
 #   sudo ./omarchy-mbp15-2016.sh install-cooling
-#   sudo ./omarchy-mbp15-2016.sh gpu-igpu
-#   sudo ./omarchy-mbp15-2016.sh gpu-dgpu
+#   sudo ./omarchy-mbp15-2016.sh install-mbpfan
+#   sudo ./omarchy-mbp15-2016.sh install-audio --ack-kernel-risk
+#   sudo ./omarchy-mbp15-2016.sh cleanup-legacy-graphics
+#   sudo ./omarchy-mbp15-2016.sh gpu-igpu --yes
+#   sudo ./omarchy-mbp15-2016.sh gpu-dgpu --yes
 #   sudo reboot
 #   sudo ./omarchy-mbp15-2016.sh verify
-#   sudo ./omarchy-mbp15-2016.sh pm-test
+#   sudo ./omarchy-mbp15-2016.sh pm-test --yes
 #   sudo ./omarchy-mbp15-2016.sh previous-boot
 #   sudo ./omarchy-mbp15-2016.sh rollback
 #
@@ -24,7 +29,8 @@ set -Eeuo pipefail
 # - Never runs a real suspend automatically.
 # - Real suspend must be tested manually with physical access.
 # - Wi-Fi NVRAM needs the REAL macOS Wi-Fi MAC; never use 00:90:4c:*.
-# - Touch Bar & Suspend are fully decoupled from GPU; iGPU mode is 100% compatible.
+# - GPU switching is staged separately and never changes a running display route.
+# - iGPU mode requires a boot path that keeps Intel IGD enabled (apple_set_os/rEFInd).
 
 MODEL="MacBookPro13,3"
 STATE="/var/lib/mbp15-2016-t1-touchbar-fix"
@@ -35,10 +41,15 @@ MBPFAN_REPO="$SRC/mbpfan"
 T1_URL="https://github.com/nohzafk/omarchy-macbookpro-t1.git"
 AUDIO_URL="https://github.com/davidjo/snd_hda_macbookpro.git"
 MBPFAN_URL="https://github.com/linux-on-mac/mbpfan.git"
+T1_REF="8e479f0af82d16f47de811bef6e1a5cfd7d8c5f8"
+AUDIO_REF="89b22ff90b86468b186706861dd18663562defa7"
+MBPFAN_REF="afb8bbb83dd8de85856e297e267581dab4f3f201"
 
-WIFI_URL="https://raw.githubusercontent.com/nohzafk/omarchy-macbookpro-t1/main/firmware/brcmfmac43602-pcie.txt"
+WIFI_URL="https://raw.githubusercontent.com/nohzafk/omarchy-macbookpro-t1/${T1_REF}/firmware/brcmfmac43602-pcie.txt"
+WIFI_SHA256="b109f3e6663b0e888c2559e36f7e0109f2a3a6b9765786d11f849f16d4b32d06"
 WIFI_FILE="/usr/lib/firmware/brcm/brcmfmac43602-pcie.txt"
 WIFI_BAK="$STATE/brcmfmac43602-pcie.txt.before"
+WIFI_INSTALLED="$STATE/wifi-nvram.installed"
 
 TB_HELPER="/usr/local/sbin/touchbar-enable.sh"
 TB_UNIT="/etc/systemd/system/touchbar.service"
@@ -54,6 +65,14 @@ MBPFAN_UNIT="/etc/systemd/system/mbpfan.service"
 COOLING_UNIT="/etc/systemd/system/macbook-cpu-cooling.service"
 EFI_VARS="/sys/firmware/efi/efivars"
 EFI_GPU_VAR="gpu-power-prefs-fa4ce28d-b62f-4c99-9cc3-6815686e30f9"
+EFI_GPU_BAK="$STATE/${EFI_GPU_VAR}.before"
+EFI_GPU_ABSENT="$STATE/${EFI_GPU_VAR}.absent"
+AUDIO_INSTALLED="$STATE/audio-dkms.installed"
+TB_INSTALLED="$STATE/touchbar-dkms.installed"
+MBPFAN_INSTALLED="$STATE/mbpfan.installed"
+MBPFAN_BIN_BAK="$STATE/mbpfan.binary.before"
+MBPFAN_BIN_ABSENT="$STATE/mbpfan.binary.absent"
+MBPFAN_BIN_PATH="$STATE/mbpfan.binary.path"
 
 log(){ printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 ok(){ printf '\033[1;32m OK \033[0m %s\n' "$*"; }
@@ -88,32 +107,67 @@ preflight(){ preflight_model; preflight_t1; }
 backup_once(){
   local src="$1" name="$2"
   install -d -m 0755 "$STATE"
-  [[ -e "$src" && ! -e "$STATE/$name" ]] && cp -a "$src" "$STATE/$name" || true
+  [[ ! -e "$STATE/$name" && ! -e "$STATE/$name.absent" ]] || return 0
+  if [[ -e "$src" ]]; then cp -a "$src" "$STATE/$name"; else touch "$STATE/$name.absent"; fi
 }
 restore_or_remove(){
   local dst="$1" name="$2"
-  if [[ -e "$STATE/$name" ]]; then cp -a "$STATE/$name" "$dst"; else rm -f "$dst"; fi
+  if [[ -e "$STATE/$name" ]]; then
+    cp -a "$STATE/$name" "$dst"
+  elif [[ -e "$STATE/$name.absent" ]]; then
+    rm -f "$dst"
+  else
+    warn "No ownership/backup marker for $dst; leaving it unchanged"
+  fi
+}
+restore_tree_or_remove(){
+  local dst="$1" name="$2"
+  if [[ -e "$STATE/$name" ]]; then
+    rm -rf "$dst"
+    cp -a "$STATE/$name" "$dst"
+  elif [[ -e "$STATE/$name.absent" ]]; then
+    rm -rf "$dst"
+  else
+    warn "No ownership/backup marker for $dst; leaving it unchanged"
+  fi
 }
 
 git_sync(){
-  local url="$1" dir="$2"
+  local url="$1" dir="$2" ref="$3" actual
   install -d -m 0755 "$(dirname "$dir")"
   if [[ -d "$dir/.git" ]]; then
-    git -C "$dir" fetch --depth=1 origin
-    git -C "$dir" reset --hard origin/HEAD
+    git -C "$dir" remote set-url origin "$url"
   else
-    rm -rf "$dir"
-    git clone --depth 1 "$url" "$dir"
+    [[ ! -e "$dir" ]] || die "Refusing to replace non-git path: $dir"
+    git init -q "$dir"
+    git -C "$dir" remote add origin "$url"
   fi
+  git -C "$dir" fetch --depth=1 origin "$ref"
+  git -C "$dir" reset --hard FETCH_HEAD
+  actual="$(git -C "$dir" rev-parse HEAD)"
+  [[ "$actual" == "$ref" ]] || die "Pinned source verification failed for $url (expected $ref, got $actual)."
+}
+
+require_kernel_headers(){
+  local build="/usr/lib/modules/$(uname -r)/build"
+  [[ -e "$build/Makefile" ]] || die "Headers for running kernel $(uname -r) are missing at $build. Install the matching headers package; do not blindly install linux-headers for a custom kernel."
+}
+require_reviewed_kernel_family(){
+  case "$(uname -r)" in
+    7.1.*|7.2.*) ;;
+    *) die "Out-of-tree DKMS installation is restricted to the reviewed Linux 7.1.x/7.2.x families; running $(uname -r). Re-audit the pinned driver before extending this allowlist." ;;
+  esac
 }
 
 install_packages(){
   have pacman || die "pacman not found; this script targets Omarchy/Arch."
-  pacman -S --needed --noconfirm base-devel git curl wget dkms linux-headers zstd patch \
+  pacman -S --needed --noconfirm base-devel git curl wget dkms zstd patch \
     alsa-utils pipewire wireplumber usbutils pciutils iw v4l-utils lm_sensors
   if pacman -Q macbook12-spi-driver-dkms >/dev/null 2>&1; then
+    modinfo applespi >/dev/null 2>&1 || die "Refusing to remove macbook12-spi-driver-dkms: mainline applespi is not available."
     pacman -Rns --noconfirm macbook12-spi-driver-dkms || true
   fi
+  require_kernel_headers
 }
 
 # ---------- Wi-Fi ----------
@@ -130,10 +184,12 @@ install_wifi(){
   backup_once "$WIFI_FILE" "brcmfmac43602-pcie.txt.before"
   local tmp; tmp="$(mktemp)"; trap 'rm -f "$tmp"' RETURN
   curl -fL --retry 3 --connect-timeout 15 "$WIFI_URL" -o "$tmp"
+  printf '%s  %s\n' "$WIFI_SHA256" "$tmp" | sha256sum -c - >/dev/null || die "Downloaded BCM43602 NVRAM checksum mismatch."
   grep -q '^devid=0x43ba$' "$tmp" || die "Downloaded BCM43602 NVRAM failed sanity check."
   grep -q '^macaddr=' "$tmp" || die "Downloaded NVRAM lacks macaddr=."
   sed -i "s/^macaddr=.*/macaddr=$mac/" "$tmp"
   install -m 0644 "$tmp" "$WIFI_FILE"
+  touch "$WIFI_INSTALLED"
   ok "BCM43602 board NVRAM installed with supplied macOS MAC"
 }
 verify_wifi(){
@@ -156,9 +212,13 @@ verify_applespi(){
 
 # ---------- Audio ----------
 install_audio(){
-  git_sync "$AUDIO_URL" "$AUDIO_REPO"
+  [[ "${1:-}" == "--ack-kernel-risk" ]] || die "Audio is optional and can crash incompatible kernels. Re-run as: sudo $0 install-audio --ack-kernel-risk"
+  require_reviewed_kernel_family
+  require_kernel_headers
+  git_sync "$AUDIO_URL" "$AUDIO_REPO" "$AUDIO_REF"
   log "Installing Cirrus CS8409 audio DKMS"
   ( cd "$AUDIO_REPO" && ./install.cirrus.driver.sh -i )
+  touch "$AUDIO_INSTALLED"
 }
 verify_audio(){
   log "Audio"
@@ -173,13 +233,16 @@ verify_audio(){
 
 # ---------- Touch Bar ----------
 install_touchbar(){
-  git_sync "$T1_URL" "$T1_REPO"
+  require_reviewed_kernel_family
+  require_kernel_headers
+  git_sync "$T1_URL" "$T1_REPO" "$T1_REF"
   local drv="$T1_REPO/drivers/appleibridge" ver="0.1" src="/usr/src/appleibridge-0.1"
   [[ -f "$drv/dkms.conf" ]] || die "appleibridge dkms.conf missing."
   backup_once "$TB_HELPER" "touchbar-enable.sh.before"
   backup_once "$TB_UNIT" "touchbar.service.before"
   backup_once "$TB_RESUME" "90-mbp-touchbar-resume.before"
   backup_once "$TB_MODPROBE" "99-appleibridge-late-load.conf.before"
+  backup_once "$src" "appleibridge-0.1.src.before"
 
   dkms remove -m appleibridge -v "$ver" --all >/dev/null 2>&1 || true
   rm -rf "$src"; install -d -m 0755 "$src"
@@ -200,37 +263,29 @@ blacklist apple_ib_tb
 blacklist apple_ib_als
 TBEOF
 
-  cat > "$TB_RESUME" <<'TBEOF'
-#!/bin/sh
-case "$1/$2" in
-  post/*)
-    sleep 2
-    if [ ! -f /run/touchbar/apple-ib-tb.ko ]; then
-      KDIR="/lib/modules/$(uname -r)/updates/dkms"
-      mkdir -p /run/touchbar
-      if [ -f "$KDIR/apple-ib-tb.ko.zst" ]; then
-        zstd -qdf "$KDIR/apple-ib-tb.ko.zst" -o /run/touchbar/apple-ib-tb.ko || exit 0
-      elif [ -f "$KDIR/apple-ib-tb.ko" ]; then
-        cp -f "$KDIR/apple-ib-tb.ko" /run/touchbar/apple-ib-tb.ko || exit 0
-      else
-        exit 0
-      fi
-    fi
-    /usr/bin/rmmod apple_ib_tb 2>/dev/null || true
-    sleep 1
-    /usr/bin/insmod /run/touchbar/apple-ib-tb.ko fnmode=1 idle_timeout=-1 dim_timeout=-1 2>/dev/null || true
-    ;;
-esac
-TBEOF
-  chmod 0755 "$TB_RESUME"
+  # A blocking system-sleep hook that unloads HID modules can stall the entire
+  # resume path inside the kernel. Prefer a non-working Touch Bar after resume
+  # over turning a cosmetic recovery into a machine-wide resume deadlock.
+  rm -f "$TB_RESUME"
+  install -d -m 0755 /etc/limine-entry-tool.d
+  backup_once "$LIMINE" "macbook-t1.conf.before"
+  append_cmdline "modprobe.blacklist=apple_ibridge,apple_ib_tb,apple_ib_als"
+  have limine-update || die "limine-update not found"
+  limine-update
   systemctl daemon-reload
   systemctl enable touchbar.service
-  ok "Touch Bar DKMS + late boot service + resume reload hook installed"
+  touch "$TB_INSTALLED"
+  ok "Touch Bar DKMS + late boot service installed; no blocking module-unload resume hook"
 }
 touchbar_attr(){
-  local p; p="$(readlink -f /sys/bus/hid/devices/0003:05AC:8600.0001 2>/dev/null || true)"
-  [[ -n "$p" && -e "$p/fnmode" ]] || return 1
-  printf '%s\n' "$p"
+  local d p
+  shopt -s nullglob
+  for d in /sys/bus/hid/devices/0003:05AC:8600.*; do
+    p="$(readlink -f "$d" 2>/dev/null || true)"
+    if [[ -n "$p" && -e "$p/fnmode" ]]; then shopt -u nullglob; printf '%s\n' "$p"; return 0; fi
+  done
+  shopt -u nullglob
+  return 1
 }
 verify_touchbar(){
   log "Touch Bar"
@@ -240,11 +295,16 @@ verify_touchbar(){
   fn="$(cat "$d/fnmode" 2>/dev/null || true)"
   echo "fnmode=$fn idle_timeout=$(cat "$d/idle_timeout" 2>/dev/null || true) dim_timeout=$(cat "$d/dim_timeout" 2>/dev/null || true)"
   [[ "$fn" == "1" ]] || { fail "Expected fnmode=1"; return 1; }
-  for dev in 0003:05AC:8600.0001 0003:05AC:8600.0002; do
-    local drv; drv="$(basename "$(readlink -f "/sys/bus/hid/devices/$dev/driver" 2>/dev/null)" 2>/dev/null || true)"
-    echo "$dev -> ${drv:-NONE}"
-    [[ "$drv" == "apple-ibridge-hid" ]] || { fail "$dev not owned by apple-ibridge-hid"; return 1; }
+  local dev drv count=0
+  shopt -s nullglob
+  for dev in /sys/bus/hid/devices/0003:05AC:8600.*; do
+    drv="$(basename "$(readlink -f "$dev/driver" 2>/dev/null)" 2>/dev/null || true)"
+    echo "$(basename "$dev") -> ${drv:-NONE}"
+    [[ "$drv" == "apple-ibridge-hid" ]] || continue
+    ((++count))
   done
+  shopt -u nullglob
+  (( count >= 2 )) || { fail "Expected at least two T1 HID functions owned by apple-ibridge-hid"; return 1; }
   grep -q 'Name="Apple Touch Bar' /proc/bus/input/devices || { fail "Touch Bar input device missing"; return 1; }
   ok "Touch Bar automated gates passed"
 }
@@ -323,23 +383,20 @@ nvme_bdfs(){
   done
   shopt -u nullglob
 }
-append_cmdline(){ local a="$1"; touch "$LIMINE"; grep -Fq "$a" "$LIMINE" 2>/dev/null || printf 'KERNEL_CMDLINE[default]+=" %s"\n' "$a" >> "$LIMINE"; }
+append_cmdline(){
+  local a="$1" line
+  line="KERNEL_CMDLINE[default]+=\" $a\""
+  touch "$LIMINE"
+  grep -Fqx "$line" "$LIMINE" 2>/dev/null || printf '%s\n' "$line" >> "$LIMINE"
+}
 install_suspend(){
-  install -d -m 0755 "$STATE" /etc/limine-entry-tool.d /etc/systemd/sleep.conf.d /etc/systemd/system
+  install -d -m 0755 "$STATE" /etc/limine-entry-tool.d /etc/systemd/system
   backup_once "$LIMINE" "macbook-t1.conf.before"
-  backup_once "$SLEEP_CONF" "30-mbp15-suspend.conf.before"
   backup_once "$NVME_UNIT" "mbp15-nvme-d3cold.service.before"
 
-  cat > "$SLEEP_CONF" <<'SEOF'
-[Sleep]
-SuspendState=freeze
-MemorySleepMode=s2idle
-SEOF
-  append_cmdline "mem_sleep_default=s2idle"
-  append_cmdline "iommu=pt"
-  append_cmdline "intel_iommu=on"
+  # This is the one boot parameter verified to recover all USB-C controllers
+  # on T1 MacBooks. IOMMU and sleep-mode changes must be tested separately.
   append_cmdline "pcie_ports=compat"
-  append_cmdline "modprobe.blacklist=apple_ibridge,apple_ib_tb,apple_ib_als"
 
   cat > "$NVME_UNIT" <<'NEOF'
 [Unit]
@@ -356,25 +413,17 @@ ExecStart=/usr/bin/sh -c 'for n in /sys/class/nvme/nvme*/device; do dev=$(readli
 WantedBy=multi-user.target
 NEOF
 
-  if systemctl cat omarchy-nvme-suspend-fix.service >/dev/null 2>&1; then
-    systemctl disable --now omarchy-nvme-suspend-fix.service >/dev/null 2>&1 || true
-    systemctl mask omarchy-nvme-suspend-fix.service >/dev/null 2>&1 || true
-    ok "Disabled/masked legacy omarchy-nvme-suspend-fix.service"
-  fi
   systemctl daemon-reload
   systemctl enable --now mbp15-nvme-d3cold.service
   have limine-update || die "limine-update not found"
   limine-update
-  ok "s2idle/IOMMU/PCIe/NVMe suspend configuration installed"
+  ok "Minimal PCIe/NVMe suspend configuration installed"
 }
 verify_suspend(){
   log "Suspend / NVMe"
-  local rc=0 a b v
-  for a in mem_sleep_default=s2idle iommu=pt intel_iommu=on pcie_ports=compat modprobe.blacklist=apple_ibridge,apple_ib_tb,apple_ib_als; do
-    if grep -qw "$a" /proc/cmdline; then ok "$a active"; else fail "$a missing"; rc=1; fi
-  done
+  local rc=0 b v
+  if grep -qw "pcie_ports=compat" /proc/cmdline; then ok "pcie_ports=compat active"; else fail "pcie_ports=compat missing"; rc=1; fi
   local ms; ms="$(cat /sys/power/mem_sleep 2>/dev/null || true)"; echo "mem_sleep: $ms"
-  [[ "$ms" == *"[s2idle]"* ]] && ok "s2idle selected" || { fail "s2idle not selected"; rc=1; }
   local found=0
   while read -r b; do
     [[ -n "$b" ]] || continue; found=1
@@ -382,7 +431,7 @@ verify_suspend(){
     echo "NVMe $b d3cold_allowed=$v"
     [[ "$v" == "0" ]] && ok "NVMe $b D3cold disabled" || { fail "NVMe $b D3cold is not disabled"; rc=1; }
   done < <(nvme_bdfs)
-  (( found )) || { fail "No NVMe d3cold control found"; rc=1; }
+  (( found )) || warn "No NVMe d3cold control found; nothing to override on this controller/kernel"
   if systemctl is-active --quiet mbp15-nvme-d3cold.service; then
     ok "mbp15-nvme-d3cold.service active"
   else
@@ -395,86 +444,8 @@ verify_suspend(){
 
 # ---------- Cooling / Fan / CPU Thermal ----------
 install_cooling(){
-  log "Installing mbpfan (active thermal & fan daemon)"
-  local user="${SUDO_USER:-${USER:-root}}"
-  local user_home pkg_cache
-  user_home="$(getent passwd "$user" | cut -d: -f6)"
-  pkg_cache="${user_home:-/home/$user}/.cache/yay/mbpfan"
-  local pkg=""
-
-  verify_fans_thermal || die "Cooling hardware preflight failed; refusing to install mbpfan."
-
-  # Upstream's source installer overwrites mbpfan.conf and does not install its
-  # bundled systemd unit, so preserve local state before either install path.
-  backup_once "$MBPFAN_CONF" "mbpfan.conf.before"
-  backup_once "$MBPFAN_UNIT" "mbpfan.service.before"
+  log "Configuring conservative CPU power policy (firmware keeps fan control)"
   backup_once "$COOLING_UNIT" "macbook-cpu-cooling.service.before"
-
-  if [[ -d "$pkg_cache" ]]; then
-    pkg="$(find "$pkg_cache" -maxdepth 1 -name "mbpfan-[0-9]*.pkg.tar.zst" ! -name "*debug*" 2>/dev/null | sort -V | tail -n 1)"
-  fi
-
-  if have mbpfan; then
-    ok "mbpfan executable already installed; skipping package/source installation"
-  else
-    have pacman || die "pacman not found; this script targets Omarchy/Arch."
-    if [[ -n "$pkg" && -f "$pkg" ]]; then
-      log "Installing pre-built mbpfan package: $pkg"
-      pacman -U --noconfirm --needed "$pkg"
-    else
-      if ! have git || ! have make || ! have cc; then
-        log "Installing mbpfan build dependencies"
-        pacman -S --needed --noconfirm base-devel git
-      fi
-      log "Compiling mbpfan from source..."
-      git_sync "$MBPFAN_URL" "$MBPFAN_REPO"
-      ( cd "$MBPFAN_REPO" && make && make install )
-    fi
-  fi
-
-  local mbpfan_bin modprobe_bin
-  mbpfan_bin="$(command -v mbpfan || true)"
-  [[ -n "$mbpfan_bin" && "$mbpfan_bin" == /* ]] || die "mbpfan installed, but its executable was not found in PATH."
-  modprobe_bin="$(command -v modprobe || true)"
-  [[ -n "$modprobe_bin" && "$modprobe_bin" == /* ]] || die "modprobe not found; cannot load cooling kernel modules."
-
-  log "Configuring mbpfan for MacBookPro13,3"
-  cat > "$MBPFAN_CONF" <<'EOF'
-[general]
-min_fan1_speed = 2500
-max_fan1_speed = 5900
-min_fan2_speed = 2500
-max_fan2_speed = 5400
-low_temp = 50       # Under 50°C: quiet low speed
-high_temp = 62      # Above 62°C: ramp up fan speed linearly
-max_temp = 78       # At 78°C: maximum fan speed
-polling_interval = 2
-EOF
-
-  # `make install` from linux-on-mac/mbpfan does not copy mbpfan.service.
-  # Install our own unit so both the AUR-package and source-build paths work.
-  cat > "$MBPFAN_UNIT" <<EOF
-[Unit]
-Description=MacBook Pro fan manager daemon
-After=systemd-modules-load.service
-
-[Service]
-Type=simple
-ExecStartPre=$modprobe_bin coretemp
-ExecStartPre=$modprobe_bin applesmc
-ExecStart=$mbpfan_bin -f
-ExecReload=/usr/bin/kill -HUP \$MAINPID
-Restart=on-failure
-RestartSec=1
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-  systemctl daemon-reload
-  systemctl enable mbpfan.service
-  systemctl restart mbpfan.service
-
   log "Configuring CPU power & thermal policy"
   if have powerprofilesctl; then
     powerprofilesctl set power-saver 2>/dev/null || true
@@ -497,65 +468,78 @@ EOF
   systemctl daemon-reload
   systemctl enable --now macbook-cpu-cooling.service
   verify_cooling || die "Cooling services failed post-install verification."
+  ok "CPU cooling policy deployed; no boot or display configuration was changed"
+}
 
-  log "Configuring graphics environment & disabling phantom display"
-  append_cmdline "video=eDP-2:d"
-  have limine-update && limine-update || true
-
-  if [[ -n "$user_home" && -d "$user_home" && "$user" != "root" ]]; then
-    local ic; ic="$(intel_card)"
-    local ac; ac="$(amd_card)"
-    local aq="$ic:$ac"
-
-    local env_dir="$user_home/.config/environment.d"
-    install -d -m 0755 -o "$user" -g "$user" "$env_dir"
-    cat > "$env_dir/10-graphics.conf" <<EOF
-AQ_DRM_DEVICES=$aq
-EOF
-    chown "$user:$user" "$env_dir/10-graphics.conf"
-
-    local uwsm_dir="$user_home/.config/uwsm/env.d"
-    install -d -m 0755 -o "$user" -g "$user" "$uwsm_dir"
-    echo "export AQ_DRM_DEVICES=$aq" > "$uwsm_dir/10-graphics"
-    chown "$user:$user" "$uwsm_dir/10-graphics"
-    echo "export AQ_DRM_DEVICES=$aq" > "$user_home/.config/uwsm/default"
-    chown "$user:$user" "$user_home/.config/uwsm/default"
-
-    if [[ -f /etc/environment ]]; then
-      sed -i '/AQ_DRM_DEVICES/d' /etc/environment
-      echo "AQ_DRM_DEVICES=$aq" >> /etc/environment
-    fi
-
-    local mon_file="$user_home/.config/hypr/monitors.lua"
-    if [[ -f "$mon_file" ]]; then
-      if ! grep -q 'output = "eDP-2"' "$mon_file"; then
-        if grep -q 'local omarchy_monitor_scale' "$mon_file"; then
-          sed -i '/local omarchy_monitor_scale/a hl.monitor({ output = "eDP-2", disabled = true })\nhl.monitor({ output = "eDP-1", mode = "preferred", position = "0x0", scale = omarchy_monitor_scale })' "$mon_file"
-        else
-          echo 'hl.monitor({ output = "eDP-2", disabled = true })' >> "$mon_file"
-        fi
-        chown "$user:$user" "$mon_file"
-      fi
-    fi
-
-    local hypr_file="$user_home/.config/hypr/hyprland.lua"
-    if [[ -f "$hypr_file" ]]; then
-      sed -i '/AQ_DRM_DEVICES/d' "$hypr_file"
-      echo "hl.env(\"AQ_DRM_DEVICES\", \"$aq\")" >> "$hypr_file"
-      chown "$user:$user" "$hypr_file"
-    fi
+install_mbpfan(){
+  verify_fans_thermal || die "Cooling hardware preflight failed; refusing to install mbpfan."
+  backup_once "$MBPFAN_CONF" "mbpfan.conf.before"
+  backup_once "$MBPFAN_UNIT" "mbpfan.service.before"
+  install -d -m 0755 "$STATE"
+  local old_mbpfan
+  old_mbpfan="$(command -v mbpfan || true)"
+  if [[ -n "$old_mbpfan" && ! -e "$MBPFAN_BIN_BAK" && ! -e "$MBPFAN_BIN_ABSENT" ]]; then
+    [[ "$old_mbpfan" == /usr/*/mbpfan || "$old_mbpfan" == /usr/local/*/mbpfan ]] || die "Refusing to replace mbpfan at unexpected path: $old_mbpfan"
+    cp -a "$old_mbpfan" "$MBPFAN_BIN_BAK"
+    printf '%s\n' "$old_mbpfan" > "$MBPFAN_BIN_PATH"
   fi
-  ok "Active cooling daemon (mbpfan), thermal policy, and display configs deployed"
+  have pacman || die "pacman not found; this script targets Omarchy/Arch."
+  pacman -S --needed --noconfirm base-devel git
+  git_sync "$MBPFAN_URL" "$MBPFAN_REPO" "$MBPFAN_REF"
+  ( cd "$MBPFAN_REPO" && make && make install )
+
+  local mbpfan_bin modprobe_bin
+  mbpfan_bin="$(command -v mbpfan || true)"
+  modprobe_bin="$(command -v modprobe || true)"
+  [[ -n "$mbpfan_bin" && "$mbpfan_bin" == /* ]] || die "mbpfan executable not found after installation."
+  [[ -n "$modprobe_bin" && "$modprobe_bin" == /* ]] || die "modprobe not found."
+  if [[ ! -e "$MBPFAN_BIN_BAK" && ! -e "$MBPFAN_BIN_ABSENT" ]]; then
+    touch "$MBPFAN_BIN_ABSENT"
+    printf '%s\n' "$mbpfan_bin" > "$MBPFAN_BIN_PATH"
+  fi
+
+  cat > "$MBPFAN_CONF" <<'EOF'
+[general]
+min_fan1_speed = 2500
+max_fan1_speed = 5900
+min_fan2_speed = 2500
+max_fan2_speed = 5400
+low_temp = 50
+high_temp = 62
+max_temp = 78
+polling_interval = 2
+EOF
+  cat > "$MBPFAN_UNIT" <<EOF
+[Unit]
+Description=MacBook Pro fan manager daemon
+After=systemd-modules-load.service
+
+[Service]
+Type=simple
+ExecStartPre=$modprobe_bin coretemp
+ExecStartPre=$modprobe_bin applesmc
+ExecStart=$mbpfan_bin -f
+ExecReload=/usr/bin/kill -HUP \$MAINPID
+Restart=on-failure
+RestartSec=1
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  systemctl daemon-reload
+  systemctl enable --now mbpfan.service
+  systemctl is-active --quiet mbpfan.service || die "mbpfan.service failed to start."
+  touch "$MBPFAN_INSTALLED"
+  ok "Optional pinned mbpfan service installed; no display configuration was changed"
 }
 
 verify_cooling(){
-  log "Cooling & Fan Daemon (mbpfan)"
+  log "Cooling / Fan policy"
   local rc=0
-  if systemctl is-active --quiet mbpfan.service; then
-    ok "mbpfan.service is active"
+  if systemctl is-enabled --quiet mbpfan.service 2>/dev/null; then
+    if systemctl is-active --quiet mbpfan.service; then ok "optional mbpfan.service is active"; else fail "mbpfan.service is enabled but inactive"; rc=1; fi
   else
-    fail "mbpfan.service is inactive"
-    rc=1
+    ok "Apple SMC firmware fan control retained (mbpfan not enabled)"
   fi
   if systemctl is-active --quiet macbook-cpu-cooling.service; then
     ok "macbook-cpu-cooling.service is active"
@@ -571,25 +555,6 @@ verify_cooling(){
 }
 
 # ---------- GPU Switching (apple-gmux / EFI) ----------
-intel_card(){
-  local c
-  for c in /sys/class/drm/card[0-9]; do
-    if [[ "$(readlink -f "$c/device" 2>/dev/null)" =~ 0000:00:02 ]]; then
-      echo "/dev/dri/$(basename "$c")"; return 0
-    fi
-  done
-  echo "/dev/dri/card1"
-}
-amd_card(){
-  local c
-  for c in /sys/class/drm/card[0-9]; do
-    if [[ "$(readlink -f "$c/device" 2>/dev/null)" =~ 0000:01:00 ]]; then
-      echo "/dev/dri/$(basename "$c")"; return 0
-    fi
-  done
-  echo "/dev/dri/card0"
-}
-
 active_gpu(){
   local d conn card pci bdf edid
   for d in /sys/class/drm/card*-eDP-*; do
@@ -607,106 +572,171 @@ active_gpu(){
   echo "unknown"
 }
 
+external_output_connected(){
+  local d
+  shopt -s nullglob
+  for d in /sys/class/drm/card*-DP-* /sys/class/drm/card*-HDMI-A-*; do
+    if [[ -e "$d/status" && "$(cat "$d/status" 2>/dev/null)" == "connected" ]]; then
+      shopt -u nullglob
+      echo "$(basename "$d")"
+      return 0
+    fi
+  done
+  shopt -u nullglob
+  return 1
+}
+
+target_user_home(){
+  local user="${SUDO_USER:-${USER:-root}}"
+  [[ "$user" != "root" ]] || return 1
+  getent passwd "$user" | awk -F: '{print $6}'
+}
+
+legacy_graphics_present(){
+  local home
+  grep -Eq '(^|[[:space:]])video=eDP-2:d([[:space:]]|$)' "$LIMINE" 2>/dev/null && return 0
+  grep -q '^AQ_DRM_DEVICES=' /etc/environment 2>/dev/null && return 0
+  home="$(target_user_home || true)"
+  if [[ -n "$home" ]]; then
+    legacy_graphics_in_home "$home" && return 0
+  else
+    for home in /home/*; do
+      [[ -d "$home" ]] || continue
+      legacy_graphics_in_home "$home" && return 0
+    done
+  fi
+  return 1
+}
+
+legacy_graphics_in_home(){
+  local home="$1"
+  grep -q 'AQ_DRM_DEVICES' "$home/.config/environment.d/10-graphics.conf" 2>/dev/null && return 0
+  grep -q 'AQ_DRM_DEVICES' "$home/.config/uwsm/env.d/10-graphics" 2>/dev/null && return 0
+  grep -q 'AQ_DRM_DEVICES' "$home/.config/uwsm/default" 2>/dev/null && return 0
+  grep -q 'hl.env("AQ_DRM_DEVICES"' "$home/.config/hypr/hyprland.lua" 2>/dev/null && return 0
+  grep -Fq 'hl.monitor({ output = "eDP-2", disabled = true })' "$home/.config/hypr/monitors.lua" 2>/dev/null && return 0
+  grep -Fq 'hl.monitor({ output = "eDP-1", mode = "preferred", position = "0x0", scale = omarchy_monitor_scale })' "$home/.config/hypr/monitors.lua" 2>/dev/null && return 0
+  return 1
+}
+
+preflight_igpu(){
+  local driver ext
+  [[ -e /sys/bus/pci/devices/0000:00:02.0 ]] || die "Intel IGD 00:02.0 is hidden by firmware. Configure apple_set_os/rEFInd first, reboot, and confirm 'lspci -nnk -s 00:02.0' shows Intel graphics before changing EFI GPU preference."
+  driver="$(basename "$(readlink -f /sys/bus/pci/devices/0000:00:02.0/driver 2>/dev/null)" 2>/dev/null || true)"
+  [[ "$driver" == "i915" ]] || die "Intel IGD is visible but not bound to i915 (driver: ${driver:-none}); refusing an iGPU switch."
+  ext="$(external_output_connected || true)"
+  [[ -z "$ext" ]] || die "External output $ext is connected. Disconnect all USB-C/DisplayPort/HDMI displays before selecting iGPU mode."
+  ! legacy_graphics_present || die "Legacy hard-coded eDP/AQ_DRM settings are present. Run '$0 cleanup-legacy-graphics', log out/reboot if it changed user graphics config, then retry."
+  ok "Intel IGD is visible and bound to i915; no external display is connected"
+}
+
+backup_efi_gpu_once(){
+  local f="${EFI_VARS}/${EFI_GPU_VAR}"
+  install -d -m 0755 "$STATE"
+  [[ ! -e "$EFI_GPU_BAK" && ! -e "$EFI_GPU_ABSENT" ]] || return 0
+  if [[ -e "$f" ]]; then
+    cp -a "$f" "$EFI_GPU_BAK"
+  else
+    touch "$EFI_GPU_ABSENT"
+  fi
+}
+
+restore_efi_gpu(){
+  local f="${EFI_VARS}/${EFI_GPU_VAR}"
+  if [[ -e "$EFI_GPU_BAK" ]]; then
+    chattr -i "$f" 2>/dev/null || true
+    cp -f "$EFI_GPU_BAK" "$f"
+    ok "Original EFI GPU preference restored"
+  elif [[ -e "$EFI_GPU_ABSENT" ]]; then
+    chattr -i "$f" 2>/dev/null || true
+    rm -f "$f"
+    ok "Script-created EFI GPU preference removed"
+  else
+    warn "No EFI GPU backup marker exists; EFI preference was left unchanged"
+  fi
+}
+
 efi_gpu_pref(){
   local f="${EFI_VARS}/${EFI_GPU_VAR}"
   [[ -e "$f" ]] || { echo "unset"; return 0; }
-  local b; b="$(hexdump -v -e '1/1 "%02x "' "$f" 2>/dev/null | awk '{print $5}')"
-  if [[ "$b" == "01" ]]; then echo "intel"; else echo "amd"; fi
+  local b; b="$(od -An -j4 -N1 -t u1 "$f" 2>/dev/null | tr -d '[:space:]')"
+  if [[ "$b" == "1" ]]; then echo "intel"; elif [[ "$b" == "0" ]]; then echo "amd"; else echo "unknown"; fi
+}
+
+write_efi_gpu_pref(){
+  local mode="$1" f="${EFI_VARS}/${EFI_GPU_VAR}" tmp had_old=0
+  tmp="$(mktemp)"
+  if [[ -e "$f" ]]; then cp -f "$f" "$tmp"; had_old=1; fi
+  chattr -i "$f" 2>/dev/null || true
+  if [[ "$mode" == "intel" ]]; then
+    if ! printf "\x07\x00\x00\x00\x01\x00\x00\x00" > "$f" || [[ "$(efi_gpu_pref)" != "intel" ]]; then
+      chattr -i "$f" 2>/dev/null || true
+      if (( had_old )); then cp -f "$tmp" "$f"; else rm -f "$f"; fi
+      rm -f "$tmp"
+      die "EFI Intel preference write failed verification; the value from before this command was restored."
+    fi
+  else
+    if ! printf "\x07\x00\x00\x00\x00\x00\x00\x00" > "$f" || [[ "$(efi_gpu_pref)" != "amd" ]]; then
+      chattr -i "$f" 2>/dev/null || true
+      if (( had_old )); then cp -f "$tmp" "$f"; else rm -f "$f"; fi
+      rm -f "$tmp"
+      die "EFI AMD preference write failed verification; the value from before this command was restored."
+    fi
+  fi
+  rm -f "$tmp"
+  sync
 }
 
 switch_gpu(){
-  local mode="$1"
+  local mode="$1" acknowledgement="${2:-}"
+  [[ "$acknowledgement" == "--yes" ]] || die "GPU changes take effect at reboot and can make the internal display unusable. Re-run with --yes after reading the recovery steps in README.zh-CN.md."
+  [[ "$mode" == "intel" || "$mode" == "igpu" || "$mode" == "amd" || "$mode" == "dgpu" ]] || die "Unknown GPU mode: $mode"
   [[ -d "$EFI_VARS" ]] || die "EFI variables directory ($EFI_VARS) not found."
-  local f="${EFI_VARS}/${EFI_GPU_VAR}"
-  chattr -i "$f" 2>/dev/null || true
-
-  local user="${SUDO_USER:-${USER:-root}}"
-  local user_home
-  user_home="$(getent passwd "$user" | cut -d: -f6)"
+  [[ "$mode" == "amd" || "$mode" == "dgpu" ]] || preflight_igpu
+  backup_efi_gpu_once
 
   if [[ "$mode" == "intel" || "$mode" == "igpu" ]]; then
-    log "Switching EFI preference to Integrated GPU (Intel HD 530)..."
-    printf "\x07\x00\x00\x00\x01\x00\x00\x00" > "$f"
-
-    if [[ -n "$user_home" && -d "$user_home" && "$user" != "root" ]]; then
-      local ic; ic="$(intel_card)"
-      local ac; ac="$(amd_card)"
-      local aq="$ic:$ac"
-
-      local env_dir="$user_home/.config/environment.d"
-      install -d -m 0755 -o "$user" -g "$user" "$env_dir"
-      echo "AQ_DRM_DEVICES=$aq" > "$env_dir/10-graphics.conf"
-      chown "$user:$user" "$env_dir/10-graphics.conf"
-      local uwsm_dir="$user_home/.config/uwsm/env.d"
-      install -d -m 0755 -o "$user" -g "$user" "$uwsm_dir"
-      echo "export AQ_DRM_DEVICES=$aq" > "$uwsm_dir/10-graphics"
-      chown "$user:$user" "$uwsm_dir/10-graphics"
-      echo "export AQ_DRM_DEVICES=$aq" > "$user_home/.config/uwsm/default"
-      chown "$user:$user" "$user_home/.config/uwsm/default"
-      if [[ -f /etc/environment ]]; then
-        sed -i '/AQ_DRM_DEVICES/d' /etc/environment
-        echo "AQ_DRM_DEVICES=$aq" >> /etc/environment
-      fi
-      local hypr_file="$user_home/.config/hypr/hyprland.lua"
-      if [[ -f "$hypr_file" ]]; then
-        sed -i '/AQ_DRM_DEVICES/d' "$hypr_file"
-        echo "hl.env(\"AQ_DRM_DEVICES\", \"$aq\")" >> "$hypr_file"
-        chown "$user:$user" "$hypr_file"
-      fi
-    fi
-
-    ok "Set to Intel HD 530 for next boot (AMD dGPU idle power 0W)."
-    warn "External display output (USB-C) will NOT function under iGPU mode (ports wired to AMD dGPU)."
-    warn "Reboot required to switch GPU: sudo reboot"
+    log "Setting the next-boot EFI preference to Intel HD 530"
+    write_efi_gpu_pref intel
+    ok "Next-boot preference is Intel HD 530; no Hyprland, connector, or card-number override was written"
+    warn "The bootloader must run apple_set_os on every iGPU boot. External USB-C display outputs normally require the AMD dGPU."
   elif [[ "$mode" == "amd" || "$mode" == "dgpu" ]]; then
-    log "Switching EFI preference to Dedicated GPU (AMD Radeon Pro)..."
-    printf "\x07\x00\x00\x00\x00\x00\x00\x00" > "$f"
-
-    if [[ -n "$user_home" && -d "$user_home" && "$user" != "root" ]]; then
-      local ic; ic="$(intel_card)"
-      local ac; ac="$(amd_card)"
-      local aq="$ac:$ic"
-
-      local env_dir="$user_home/.config/environment.d"
-      if [[ -f "$env_dir/10-graphics.conf" ]]; then
-        echo "AQ_DRM_DEVICES=$aq" > "$env_dir/10-graphics.conf"
-      fi
-      echo "export AQ_DRM_DEVICES=$aq" > "$user_home/.config/uwsm/env.d/10-graphics" 2>/dev/null || true
-      echo "export AQ_DRM_DEVICES=$aq" > "$user_home/.config/uwsm/default" 2>/dev/null || true
-      if [[ -f /etc/environment ]]; then
-        sed -i '/AQ_DRM_DEVICES/d' /etc/environment
-        echo "AQ_DRM_DEVICES=$aq" >> /etc/environment
-      fi
-      local hypr_file="$user_home/.config/hypr/hyprland.lua"
-      if [[ -f "$hypr_file" ]]; then
-        sed -i '/AQ_DRM_DEVICES/d' "$hypr_file"
-        echo "hl.env(\"AQ_DRM_DEVICES\", \"$aq\")" >> "$hypr_file"
-      fi
-    fi
-
-    ok "Set to AMD Radeon Pro for next boot."
-    warn "Reboot required to switch GPU: sudo reboot"
-  else
-    die "Unknown GPU mode: $mode (expected 'intel' or 'amd')"
+    log "Setting the next-boot EFI preference to AMD Radeon Pro"
+    write_efi_gpu_pref amd
+    ok "Next-boot preference is AMD Radeon Pro; no running display route was changed"
   fi
+  warn "Reboot required. Keep macOS/recovery boot media available until the next boot is verified."
 }
 
 verify_gpu(){
   log "Graphics / GPU Switching"
-  local cur efi
+  local cur efi rc=0
   cur="$(active_gpu)"
   efi="$(efi_gpu_pref)"
   echo "  Current Display GPU : $cur"
   echo "  Next Boot EFI Mode  : $efi"
   if [[ "$cur" == "intel" ]]; then
-    ok "Running on Intel HD 530 (Cool / Low Power mode, ~0W on AMD dGPU)"
+    ok "Running on Intel HD 530"
   elif [[ "$cur" == "amd" ]]; then
     warn "Running on AMD Radeon Pro (Higher heat/power, required for external displays)"
+  else
+    fail "Could not identify a connected internal eDP panel with a valid EDID"
+    rc=1
   fi
+  if [[ "$efi" == "intel" || "$efi" == "amd" ]]; then
+    [[ "$cur" == "$efi" ]] || { fail "Active display GPU does not match the saved EFI preference (pending reboot or failed switch)"; rc=1; }
+  else
+    warn "EFI GPU preference is $efi; no active/next-boot match can be asserted"
+  fi
+  return "$rc"
 }
 
 pm_test(){
+  [[ "${1:-}" == "--yes" ]] || die "pm-test invokes system suspend. Re-run with --yes while physically present and after saving work."
   need_root; preflight; verify_suspend || die "Static suspend gates failed."
+  [[ "$(active_gpu)" == "intel" ]] || die "Suspend testing on MacBookPro13,3 is only permitted while the internal display is on Intel iGPU."
+  local ext; ext="$(external_output_connected || true)"
+  [[ -z "$ext" ]] || die "Disconnect external display $ext before suspend testing."
   warn "pm_test=devices is staged testing; this is NOT a real low-power suspend."
   cleanup(){ echo none > /sys/power/pm_test 2>/dev/null || true; }
   trap cleanup EXIT INT TERM
@@ -760,72 +790,135 @@ verify(){
   return "$rc"
 }
 
-install_all(){
+install_base(){
   need_root; preflight
-  local mac="" skip=0 switch_igpu=0
-  while (($#)); do
-    case "$1" in
-      --wifi-mac) shift; (($#)) || die "--wifi-mac requires an address"; mac="$1" ;;
-      --skip-wifi-nvram) skip=1 ;;
-      --switch-igpu|--igpu) switch_igpu=1 ;;
-      *) die "Unknown argument: $1" ;;
-    esac
-    shift
-  done
+  (($# == 0)) || die "install-base takes no arguments; risky components are installed as separate stages."
   install_packages
-  git_sync "$T1_URL" "$T1_REPO"
-  if (( ! skip )); then
-    if [[ -n "$mac" ]]; then install_wifi "$mac";
-    elif [[ "$(wifi_mac || true)" =~ ^00:90:4[cC]: ]]; then die "Wi-Fi still has placeholder MAC. Re-run with --wifi-mac <real macOS MAC>.";
-    else ok "Wi-Fi already has a non-placeholder MAC; leaving NVRAM unchanged"; fi
+  ok "Base dependencies and matching running-kernel headers are ready"
+  echo "NEXT: install and verify one hardware component at a time; see README.zh-CN.md."
+}
+
+remove_exact_limine_arg(){
+  local arg="$1" line tmp
+  [[ -f "$LIMINE" ]] || return 0
+  line="KERNEL_CMDLINE[default]+=\" $arg\""
+  tmp="$(mktemp)"
+  grep -Fvx "$line" "$LIMINE" > "$tmp" || true
+  if ! cmp -s "$tmp" "$LIMINE"; then
+    install -m 0644 "$tmp" "$LIMINE"
   fi
-  install_audio
-  install_touchbar
-  install_suspend
-  install_cooling
-  if (( switch_igpu )); then
-    switch_gpu intel
+  rm -f "$tmp"
+}
+
+restore_limine_arg(){
+  local arg="$1" line backup="$STATE/macbook-t1.conf.before"
+  line="KERNEL_CMDLINE[default]+=\" $arg\""
+  if [[ -f "$backup" ]] && grep -Fqx "$line" "$backup"; then
+    touch "$LIMINE"
+    grep -Fqx "$line" "$LIMINE" || printf '%s\n' "$line" >> "$LIMINE"
+  else
+    remove_exact_limine_arg "$arg"
   fi
-  echo
-  ok "Hardware fix, cooling, and graphics configuration staged"
-  echo "NEXT:"; echo "  sudo reboot"; echo "  sudo $0 verify"; echo "  sudo $0 pm-test"
-  if (( ! switch_igpu )); then
-    echo "To switch to Intel HD 530 integrated graphics (ultimate cooling): sudo $0 gpu-igpu && sudo reboot"
+}
+
+remove_script_aq_file(){
+  local file="$1"
+  [[ -f "$file" ]] || return 0
+  if awk 'NF && $0 !~ /^(export )?AQ_DRM_DEVICES=\/dev\/dri\/card[0-9]+:\/dev\/dri\/card[0-9]+$/ { bad=1 } END { exit bad }' "$file"; then
+    rm -f "$file"
+  else
+    warn "Preserving $file because it contains settings other than the legacy script AQ_DRM_DEVICES line"
   fi
-  echo "Then, only with physical access: sudo systemctl suspend"
+}
+
+cleanup_legacy_graphics(){
+  need_root; preflight_model
+  local changed_boot=0 home hypr monitors
+  if grep -Fqx 'KERNEL_CMDLINE[default]+=" video=eDP-2:d"' "$LIMINE" 2>/dev/null; then
+    remove_exact_limine_arg "video=eDP-2:d"
+    changed_boot=1
+  fi
+  sed -i '/^AQ_DRM_DEVICES=\/dev\/dri\/card[0-9]\+:\/dev\/dri\/card[0-9]\+$/d' /etc/environment 2>/dev/null || true
+  home="$(target_user_home || true)"
+  if [[ -n "$home" && -d "$home" ]]; then
+    remove_script_aq_file "$home/.config/environment.d/10-graphics.conf"
+    remove_script_aq_file "$home/.config/uwsm/env.d/10-graphics"
+    remove_script_aq_file "$home/.config/uwsm/default"
+    hypr="$home/.config/hypr/hyprland.lua"
+    monitors="$home/.config/hypr/monitors.lua"
+    [[ ! -f "$hypr" ]] || sed -i '/^[[:space:]]*hl\.env("AQ_DRM_DEVICES", "\/dev\/dri\/card[0-9]\+:\/dev\/dri\/card[0-9]\+")[[:space:]]*$/d' "$hypr"
+    if [[ -f "$monitors" ]]; then
+      sed -i '/^[[:space:]]*hl\.monitor({ output = "eDP-2", disabled = true })[[:space:]]*$/d' "$monitors"
+      sed -i '/^[[:space:]]*hl\.monitor({ output = "eDP-1", mode = "preferred", position = "0x0", scale = omarchy_monitor_scale })[[:space:]]*$/d' "$monitors"
+    fi
+  fi
+  if (( changed_boot )); then
+    have limine-update || die "Removed legacy Limine source configuration, but limine-update is unavailable. Install/fix Limine before rebooting."
+    limine-update
+  fi
+  ok "Legacy hard-coded DRM card ordering and eDP connector overrides removed"
+  warn "Log out and back in (or reboot) before GPU preflight if a user graphics file changed."
 }
 
 rollback(){
-  need_root; preflight
+  need_root; preflight_model
   systemctl disable --now touchbar.service >/dev/null 2>&1 || true
   systemctl disable --now mbp15-nvme-d3cold.service >/dev/null 2>&1 || true
   systemctl disable --now mbp13-nvme-d3cold.service >/dev/null 2>&1 || true
   systemctl disable --now mbpfan.service >/dev/null 2>&1 || true
   systemctl disable --now macbook-cpu-cooling.service >/dev/null 2>&1 || true
+  if [[ -e "$TB_INSTALLED" || -d "$T1_REPO/.git" ]]; then dkms remove -m appleibridge -v 0.1 --all >/dev/null 2>&1 || true; fi
+  if [[ -e "$AUDIO_INSTALLED" || -d "$AUDIO_REPO/.git" ]]; then dkms remove -m snd_hda_macbookpro -v 0.1 --all >/dev/null 2>&1 || true; fi
   restore_or_remove "$TB_HELPER" "touchbar-enable.sh.before"
   restore_or_remove "$TB_UNIT" "touchbar.service.before"
   restore_or_remove "$TB_RESUME" "90-mbp-touchbar-resume.before"
   restore_or_remove "$TB_MODPROBE" "99-appleibridge-late-load.conf.before"
-  restore_or_remove "$SLEEP_CONF" "30-mbp15-suspend.conf.before"
+  restore_tree_or_remove "/usr/src/appleibridge-0.1" "appleibridge-0.1.src.before"
+  if [[ -e "$STATE/30-mbp15-suspend.conf.before" || -e "$STATE/30-mbp15-suspend.conf.before.absent" ]]; then
+    restore_or_remove "$SLEEP_CONF" "30-mbp15-suspend.conf.before"
+  fi
   restore_or_remove "$NVME_UNIT" "mbp15-nvme-d3cold.service.before"
   restore_or_remove "$MBPFAN_CONF" "mbpfan.conf.before"
   restore_or_remove "$MBPFAN_UNIT" "mbpfan.service.before"
   restore_or_remove "$COOLING_UNIT" "macbook-cpu-cooling.service.before"
-  if [[ -e "$STATE/macbook-t1.conf.before" ]]; then cp -a "$STATE/macbook-t1.conf.before" "$LIMINE"; fi
-  if [[ -e "$WIFI_BAK" ]]; then cp -a "$WIFI_BAK" "$WIFI_FILE"; fi
-
-  local user="${SUDO_USER:-${USER:-root}}"
-  local user_home
-  user_home="$(getent passwd "$user" | cut -d: -f6)"
-  if [[ -n "$user_home" && -d "$user_home" && "$user" != "root" ]]; then
-    rm -f "$user_home/.config/environment.d/10-graphics.conf" "$user_home/.config/uwsm/env.d/10-graphics" "$user_home/.config/uwsm/default"
-    sed -i '/AQ_DRM_DEVICES/d' "$user_home/.config/hypr/hyprland.lua" 2>/dev/null || true
-    sed -i '/eDP-2/d' "$user_home/.config/hypr/monitors.lua" 2>/dev/null || true
+  if [[ -f "$MBPFAN_BIN_PATH" ]]; then
+    local mbpfan_path
+    mbpfan_path="$(head -n 1 "$MBPFAN_BIN_PATH")"
+    if [[ "$mbpfan_path" == /usr/*/mbpfan || "$mbpfan_path" == /usr/local/*/mbpfan ]]; then
+      if [[ -e "$MBPFAN_BIN_BAK" ]]; then cp -a "$MBPFAN_BIN_BAK" "$mbpfan_path"; elif [[ -e "$MBPFAN_BIN_ABSENT" ]]; then rm -f "$mbpfan_path"; fi
+    else
+      warn "Ignoring unsafe saved mbpfan path: $mbpfan_path"
+    fi
   fi
+  restore_limine_arg "modprobe.blacklist=apple_ibridge,apple_ib_tb,apple_ib_als"
+  restore_limine_arg "pcie_ports=compat"
+  restore_limine_arg "video=eDP-2:d"
+  restore_limine_arg "mem_sleep_default=s2idle"
+  restore_limine_arg "iommu=pt"
+  restore_limine_arg "intel_iommu=on"
+  [[ ! -f "$LIMINE" || -s "$LIMINE" ]] || rm -f "$LIMINE"
+  if [[ -e "$WIFI_BAK" ]]; then
+    cp -a "$WIFI_BAK" "$WIFI_FILE"
+  elif [[ -e "$WIFI_INSTALLED" ]]; then
+    rm -f "$WIFI_FILE"
+  fi
+  restore_efi_gpu
 
-  systemctl unmask omarchy-nvme-suspend-fix.service >/dev/null 2>&1 || true
+  local user_home
+  user_home="$(target_user_home || true)"
+  if [[ -n "$user_home" && -d "$user_home" ]]; then
+    remove_script_aq_file "$user_home/.config/environment.d/10-graphics.conf"
+    remove_script_aq_file "$user_home/.config/uwsm/env.d/10-graphics"
+    remove_script_aq_file "$user_home/.config/uwsm/default"
+    sed -i '/^[[:space:]]*hl\.env("AQ_DRM_DEVICES", "\/dev\/dri\/card[0-9]\+:\/dev\/dri\/card[0-9]\+")[[:space:]]*$/d' "$user_home/.config/hypr/hyprland.lua" 2>/dev/null || true
+    sed -i '/^[[:space:]]*hl\.monitor({ output = "eDP-2", disabled = true })[[:space:]]*$/d' "$user_home/.config/hypr/monitors.lua" 2>/dev/null || true
+    sed -i '/^[[:space:]]*hl\.monitor({ output = "eDP-1", mode = "preferred", position = "0x0", scale = omarchy_monitor_scale })[[:space:]]*$/d' "$user_home/.config/hypr/monitors.lua" 2>/dev/null || true
+  fi
+  sed -i '/^AQ_DRM_DEVICES=\/dev\/dri\/card[0-9]\+:\/dev\/dri\/card[0-9]\+$/d' /etc/environment 2>/dev/null || true
+
   systemctl daemon-reload
-  have limine-update && limine-update || true
+  if have limine-update; then limine-update || warn "limine-update failed; repair/update the boot entry before rebooting"; else warn "limine-update not found; boot entry was not refreshed"; fi
+  rm -f "$AUDIO_INSTALLED" "$TB_INSTALLED" "$WIFI_INSTALLED" "$MBPFAN_INSTALLED"
   ok "Rollback staged; reboot required"
 }
 
@@ -835,47 +928,59 @@ MacBookPro13,3 (2016 15-inch Touch Bar/T1) hardware fix & cooling script
 
 Usage:
   sudo $0 status
-  sudo $0 install --wifi-mac AA:BB:CC:DD:EE:FF [--switch-igpu]
-  sudo $0 install --skip-wifi-nvram [--switch-igpu]
+  sudo $0 install-base
+  sudo $0 install-wifi AA:BB:CC:DD:EE:FF
+  sudo $0 install-touchbar
   sudo $0 install-suspend
   sudo $0 install-cooling
-  sudo $0 gpu-igpu
-  sudo $0 gpu-dgpu
+  sudo $0 install-mbpfan
+  sudo $0 install-audio --ack-kernel-risk
+  sudo $0 cleanup-legacy-graphics
+  sudo $0 gpu-igpu --yes
+  sudo $0 gpu-dgpu --yes
   sudo reboot
   sudo $0 verify
-  sudo $0 pm-test
+  sudo $0 verify-COMPONENT  # COMPONENT: touchbar, suspend, gpu, wifi, cooling, or audio
+  sudo $0 pm-test --yes
   sudo $0 previous-boot
   sudo $0 rollback
 
-Options:
-  --switch-igpu, --igpu : Immediately set EFI GPU preference to Intel HD 530 during install
-  --skip-wifi-nvram     : Keep existing Wi-Fi NVRAM configuration without re-flashing MAC
-
 Commands:
-  install-cooling : Deploy active fan control (mbpfan) and CPU thermal policy
-  gpu-igpu        : Switch to Intel HD 530 integrated graphics (cool, high battery life)
-  gpu-dgpu        : Switch to AMD Radeon Pro discrete graphics (for external displays)
-  install-suspend : Deploy NVMe D3cold fix and Limine s2idle configuration
-  install-touchbar: Build and install Touch Bar DKMS driver and service
-  install-audio   : Build and install Cirrus CS8409 audio DKMS driver
-
-Touch Bar & Suspend are completely decoupled from GPU state.
+  install-base     Install dependencies only; there is deliberately no full one-shot install
+  install-cooling  Deploy a conservative CPU policy without changing displays
+  install-mbpfan   Optionally build the pinned active fan daemon
+  gpu-igpu         Preflight Intel/i915 and external displays, then set next-boot EFI preference
+  gpu-dgpu         Set next-boot AMD EFI preference; neither GPU command edits Hyprland
+  install-suspend  Deploy only pcie_ports=compat and the NVMe D3cold service
+  install-touchbar Build the pinned Touch Bar DKMS driver without a blocking resume hook
+  install-audio    Opt-in pinned audio DKMS; install last because kernel compatibility varies
 USAGE
 }
 
-case "${1:-}" in
-  status) status ;;
-  install|apply) shift; install_all "$@" ;;
-  install-suspend|install-nvme) need_root; preflight; install_suspend ;;
-  install-cooling|install-thermal) need_root; preflight_model; install_cooling ;;
-  gpu-igpu|switch-igpu) need_root; preflight; switch_gpu intel ;;
-  gpu-dgpu|switch-dgpu) need_root; preflight; switch_gpu amd ;;
-  install-touchbar) need_root; preflight; install_touchbar ;;
-  install-audio) need_root; preflight; install_audio ;;
-  verify) verify ;;
-  pm-test) pm_test ;;
-  previous-boot) previous_boot ;;
-  rollback) rollback ;;
-  help|-h|--help|"") usage ;;
-  *) usage; exit 2 ;;
-esac
+if [[ "${MBP15_LIB_ONLY:-0}" != "1" ]]; then
+  case "${1:-}" in
+    status) status ;;
+    install|apply|install-base) shift; install_base "$@" ;;
+    install-wifi) shift; (($# == 1)) || die "Usage: sudo $0 install-wifi AA:BB:CC:DD:EE:FF"; need_root; preflight; install_wifi "$1" ;;
+    install-suspend|install-nvme) need_root; preflight; install_suspend ;;
+    install-cooling|install-thermal) need_root; preflight_model; install_cooling ;;
+    install-mbpfan) need_root; preflight_model; install_mbpfan ;;
+    cleanup-legacy-graphics) cleanup_legacy_graphics ;;
+    gpu-igpu|switch-igpu) shift; [[ $# -eq 1 ]] || die "Usage: sudo $0 gpu-igpu --yes"; need_root; preflight_model; switch_gpu intel "$1" ;;
+    gpu-dgpu|switch-dgpu) shift; [[ $# -eq 1 ]] || die "Usage: sudo $0 gpu-dgpu --yes"; need_root; preflight_model; switch_gpu amd "$1" ;;
+    install-touchbar) need_root; preflight; install_touchbar ;;
+    install-audio) shift; [[ $# -eq 1 ]] || die "Usage: sudo $0 install-audio --ack-kernel-risk"; need_root; preflight; install_audio "$1" ;;
+    verify) verify ;;
+    verify-touchbar) need_root; preflight; verify_touchbar ;;
+    verify-suspend) need_root; preflight; verify_suspend ;;
+    verify-gpu) need_root; preflight_model; verify_gpu ;;
+    verify-wifi) need_root; preflight; verify_wifi ;;
+    verify-cooling) need_root; preflight_model; verify_cooling ;;
+    verify-audio) need_root; preflight; verify_audio ;;
+    pm-test) shift; [[ $# -eq 1 ]] || die "Usage: sudo $0 pm-test --yes"; pm_test "$1" ;;
+    previous-boot) previous_boot ;;
+    rollback) rollback ;;
+    help|-h|--help|"") usage ;;
+    *) usage; exit 2 ;;
+  esac
+fi
